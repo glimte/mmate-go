@@ -1,0 +1,42 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+*.html
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# Build artifacts
+/bin/
+/dist/
+mmate-monitor
+pubsub
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+.cursor
+.project
+.claude
+
+# OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Development artifacts
+build_output.txt

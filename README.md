@@ -98,10 +98,10 @@ Mmate Go is fully compatible with the .NET implementation at the wire format lev
 
 For comprehensive documentation including advanced features, patterns, and examples:
 
-- **[Mmate Documentation](../mmate-docs/README.md)** - Complete documentation for all platforms
-- **[Getting Started](../mmate-docs/getting-started/go.md)** - Go specific setup guide
-- **[API Reference](../mmate-docs/platform/go/api-reference.md)** - Go API documentation
-- **[Examples](../mmate-docs/platform/go/examples.md)** - Go code examples
+- **[Mmate Documentation](https://github.com/glimte/mmate-docs)** - Complete documentation for all platforms
+- **[Getting Started](https://github.com/glimte/mmate-docs/blob/main/getting-started/go.md)** - Go specific setup guide
+- **[API Reference](https://github.com/glimte/mmate-docs/blob/main/platform/go/api-reference.md)** - Go API documentation
+- **[Examples](https://github.com/glimte/mmate-docs/blob/main/platform/go/examples.md)** - Go code examples
 
 ## Requirements
 

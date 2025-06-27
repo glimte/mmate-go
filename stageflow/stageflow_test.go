@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/glimte/mmate-go/contracts"
+	"github.com/glimte/mmate-go/messaging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
@@ -15,8 +17,23 @@ type mockPublisher struct {
 	mock.Mock
 }
 
-func (m *mockPublisher) Publish(ctx context.Context, data interface{}) error {
-	args := m.Called(ctx, data)
+func (m *mockPublisher) Publish(ctx context.Context, msg contracts.Message, options ...messaging.PublishOption) error {
+	args := m.Called(ctx, msg, options)
+	return args.Error(0)
+}
+
+func (m *mockPublisher) PublishEvent(ctx context.Context, event contracts.Event, options ...messaging.PublishOption) error {
+	args := m.Called(ctx, event, options)
+	return args.Error(0)
+}
+
+func (m *mockPublisher) PublishCommand(ctx context.Context, command contracts.Command, options ...messaging.PublishOption) error {
+	args := m.Called(ctx, command, options)
+	return args.Error(0)
+}
+
+func (m *mockPublisher) Close() error {
+	args := m.Called()
 	return args.Error(0)
 }
 
@@ -24,13 +41,18 @@ type mockSubscriber struct {
 	mock.Mock
 }
 
-func (m *mockSubscriber) Subscribe(ctx context.Context, queueName string, handler func(context.Context, interface{}) error) error {
-	args := m.Called(ctx, queueName, handler)
+func (m *mockSubscriber) Subscribe(ctx context.Context, queue string, messageType string, handler messaging.MessageHandler, options ...messaging.SubscriptionOption) error {
+	args := m.Called(ctx, queue, messageType, handler, options)
 	return args.Error(0)
 }
 
 func (m *mockSubscriber) Unsubscribe(queueName string) error {
 	args := m.Called(queueName)
+	return args.Error(0)
+}
+
+func (m *mockSubscriber) Close() error {
+	args := m.Called()
 	return args.Error(0)
 }
 

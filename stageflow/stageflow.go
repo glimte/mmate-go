@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/glimte/mmate-go/internal/reliability"
+	"github.com/glimte/mmate-go/messaging"
 	"github.com/google/uuid"
 )
 
@@ -136,21 +137,10 @@ type Workflow struct {
 	retryPolicy reliability.RetryPolicy
 }
 
-// Publisher defines the interface for publishing messages
-type Publisher interface {
-	Publish(ctx context.Context, data interface{}) error
-}
-
-// Subscriber defines the interface for subscribing to messages
-type Subscriber interface {
-	Subscribe(ctx context.Context, queueName string, handler func(context.Context, interface{}) error) error
-	Unsubscribe(queueName string) error
-}
-
 // StageFlowEngine manages workflow execution
 type StageFlowEngine struct {
-	publisher  Publisher
-	subscriber Subscriber
+	publisher  messaging.Publisher
+	subscriber messaging.Subscriber
 	stateStore StateStore
 	workflows  map[string]*Workflow
 	mu         sync.RWMutex
@@ -181,7 +171,7 @@ func WithStageFlowLogger(logger *slog.Logger) EngineOption {
 }
 
 // NewStageFlowEngine creates a new stage flow engine
-func NewStageFlowEngine(publisher Publisher, subscriber Subscriber, opts ...EngineOption) *StageFlowEngine {
+func NewStageFlowEngine(publisher messaging.Publisher, subscriber messaging.Subscriber, opts ...EngineOption) *StageFlowEngine {
 	config := &EngineConfig{
 		StateStore: NewInMemoryStateStore(),
 		Logger:     slog.Default(),

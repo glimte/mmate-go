@@ -1,6 +1,7 @@
 package mmate
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 
@@ -15,6 +16,8 @@ type Client struct {
 	publisher  *messaging.MessagePublisher
 	subscriber *messaging.MessageSubscriber
 	dispatcher *messaging.MessageDispatcher
+	serviceName string
+	receiveQueue string
 }
 
 // NewClient creates a new mmate client with default RabbitMQ transport
@@ -26,6 +29,7 @@ func NewClient(connectionString string) (*Client, error) {
 func NewClientWithOptions(connectionString string, options ...ClientOption) (*Client, error) {
 	cfg := &clientConfig{
 		logger: slog.Default(),
+		serviceName: "service", // Default service name
 	}
 
 	for _, opt := range options {
@@ -64,12 +68,38 @@ func NewClientWithOptions(connectionString string, options ...ClientOption) (*Cl
 		dispatcher,
 		messaging.WithSubscriberLogger(cfg.logger),
 	)
+	
+	// Create the service's receive queue automatically
+	queueName := fmt.Sprintf("%s-queue", cfg.serviceName)
+	queueOpts := messaging.QueueOptions{
+		Durable:    true,
+		AutoDelete: false,
+		Exclusive:  false,
+	}
+	
+	// Create queue with bindings if provided
+	if len(cfg.queueBindings) > 0 {
+		err = transport.DeclareQueueWithBindings(context.Background(), queueName, queueOpts, cfg.queueBindings)
+		if err != nil {
+			return nil, fmt.Errorf("failed to declare service queue with bindings: %w", err)
+		}
+		cfg.logger.Info("Service queue created with bindings", "queue", queueName, "bindings", len(cfg.queueBindings))
+	} else {
+		// Just create the queue without bindings
+		err = transport.CreateQueue(context.Background(), queueName, queueOpts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create service queue: %w", err)
+		}
+		cfg.logger.Info("Service queue created", "queue", queueName)
+	}
 
 	return &Client{
-		transport:  transport,
-		publisher:  publisher,
-		subscriber: subscriber,
-		dispatcher: dispatcher,
+		transport:    transport,
+		publisher:    publisher,
+		subscriber:   subscriber,
+		dispatcher:   dispatcher,
+		serviceName:  cfg.serviceName,
+		receiveQueue: queueName,
 	}, nil
 }
 
@@ -93,6 +123,11 @@ func (c *Client) Transport() messaging.Transport {
 	return c.transport
 }
 
+// ServiceQueue returns the service's receive queue name
+func (c *Client) ServiceQueue() string {
+	return c.receiveQueue
+}
+
 // Close closes all resources
 func (c *Client) Close() error {
 	if c.publisher != nil {
@@ -109,8 +144,10 @@ func (c *Client) Close() error {
 
 // clientConfig holds client configuration
 type clientConfig struct {
-	logger     *slog.Logger
-	enableFIFO bool
+	logger      *slog.Logger
+	enableFIFO  bool
+	serviceName string
+	queueBindings []messaging.QueueBinding
 }
 
 // ClientOption configures the client
@@ -134,5 +171,19 @@ func WithDefaultLogger() ClientOption {
 func WithFIFOMode(enabled bool) ClientOption {
 	return func(cfg *clientConfig) {
 		cfg.enableFIFO = enabled
+	}
+}
+
+// WithServiceName sets the service name (used for queue naming)
+func WithServiceName(name string) ClientOption {
+	return func(cfg *clientConfig) {
+		cfg.serviceName = name
+	}
+}
+
+// WithQueueBindings sets the queue bindings for the service's receive queue
+func WithQueueBindings(bindings ...messaging.QueueBinding) ClientOption {
+	return func(cfg *clientConfig) {
+		cfg.queueBindings = bindings
 	}
 }

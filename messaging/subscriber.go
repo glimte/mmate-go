@@ -316,7 +316,9 @@ func (s *MessageSubscriber) handleDelivery(ctx context.Context, delivery Transpo
 			"queue", subscription.Queue,
 			"error", err,
 		)
-		delivery.Reject(false) // Don't requeue invalid messages
+		if !subscription.Options.AutoAck {
+			delivery.Reject(false) // Don't requeue invalid messages
+		}
 		return
 	}
 
@@ -328,7 +330,9 @@ func (s *MessageSubscriber) handleDelivery(ctx context.Context, delivery Transpo
 			"messageType", envelope.Type,
 			"error", err,
 		)
-		delivery.Reject(false)
+		if !subscription.Options.AutoAck {
+			delivery.Reject(false)
+		}
 		return
 	}
 
@@ -343,20 +347,24 @@ func (s *MessageSubscriber) handleDelivery(ctx context.Context, delivery Transpo
 		)
 
 		// Handle error based on error handler policy
-		action := s.errorHandler.HandleError(ctx, msg, err)
-		switch action {
-		case Acknowledge:
-			delivery.Acknowledge()
-		case Retry:
-			delivery.Reject(true) // Requeue for retry
-		case Reject:
-			delivery.Reject(false) // Send to DLQ
+		if !subscription.Options.AutoAck {
+			action := s.errorHandler.HandleError(ctx, msg, err)
+			switch action {
+			case Acknowledge:
+				delivery.Acknowledge()
+			case Retry:
+				delivery.Reject(true) // Requeue for retry
+			case Reject:
+				delivery.Reject(false) // Send to DLQ
+			}
 		}
 		return
 	}
 
-	// Success - acknowledge message
-	delivery.Acknowledge()
+	// Success - acknowledge message only if not using auto-ack
+	if !subscription.Options.AutoAck {
+		delivery.Acknowledge()
+	}
 
 	s.logger.Debug("message processed successfully",
 		"messageId", msg.GetID(),

@@ -126,3 +126,10 @@ func NewBaseReply(requestID, correlationID string) BaseReply {
 	reply.SetCorrelationID(correlationID)
 	return reply
 }
+
+// NewBaseQuery creates a new query with generated ID and current timestamp
+func NewBaseQuery(messageType string) BaseQuery {
+	return BaseQuery{
+		BaseMessage: NewBaseMessage(messageType),
+	}
+}

@@ -60,6 +60,9 @@ type Transport interface {
 	// BindQueue creates a binding between queue and exchange
 	BindQueue(ctx context.Context, queue, exchange, routingKey string) error
 	
+	// DeclareQueueWithBindings creates a queue and its bindings in one operation
+	DeclareQueueWithBindings(ctx context.Context, name string, options QueueOptions, bindings []QueueBinding) error
+	
 	// Connect establishes connection to the broker
 	Connect(ctx context.Context) error
 	
@@ -68,6 +71,13 @@ type Transport interface {
 	
 	// IsConnected returns connection status
 	IsConnected() bool
+}
+
+// QueueBinding represents a queue to exchange binding
+type QueueBinding struct {
+	Exchange   string
+	RoutingKey string
+	Arguments  map[string]interface{}
 }
 
 // QueueOptions defines options for queue creation

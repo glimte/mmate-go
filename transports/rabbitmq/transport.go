@@ -13,9 +13,10 @@ import (
 
 // Transport implements messaging.Transport for RabbitMQ
 type Transport struct {
-	manager   *rabbitmq.ConnectionManager
-	publisher *rabbitmq.Publisher
-	consumer  *rabbitmq.Consumer
+	manager    *rabbitmq.ConnectionManager
+	publisher  *rabbitmq.Publisher
+	consumer   *rabbitmq.Consumer
+	enableFIFO bool
 }
 
 // TransportConfig holds configuration for the transport
@@ -88,9 +89,10 @@ func NewTransport(connectionString string, options ...TransportOption) (*Transpo
 	consumer := rabbitmq.NewConsumer(pool, cfg.ConsumerOptions...)
 
 	transport := &Transport{
-		manager:   manager,
-		publisher: publisher,
-		consumer:  consumer,
+		manager:    manager,
+		publisher:  publisher,
+		consumer:   consumer,
+		enableFIFO: cfg.EnableFIFO,
 	}
 
 	// Declare standard exchanges
@@ -130,6 +132,11 @@ func (t *Transport) CreateQueue(ctx context.Context, name string, options messag
 	args := make(amqp.Table)
 	for k, v := range options.Args {
 		args[k] = v
+	}
+	
+	// If FIFO mode is enabled, add single-active-consumer argument
+	if t.enableFIFO {
+		args["x-single-active-consumer"] = true
 	}
 
 	_, err = channel.QueueDeclare(
@@ -178,6 +185,24 @@ func (t *Transport) BindQueue(ctx context.Context, queue, exchange, routingKey s
 		false, // no-wait
 		nil,   // args
 	)
+}
+
+// DeclareQueueWithBindings creates a queue and its bindings in one operation
+func (t *Transport) DeclareQueueWithBindings(ctx context.Context, name string, options messaging.QueueOptions, bindings []messaging.QueueBinding) error {
+	// First create the queue
+	if err := t.CreateQueue(ctx, name, options); err != nil {
+		return fmt.Errorf("failed to create queue: %w", err)
+	}
+	
+	// Then create all bindings
+	for _, binding := range bindings {
+		if err := t.BindQueue(ctx, name, binding.Exchange, binding.RoutingKey); err != nil {
+			return fmt.Errorf("failed to bind queue %s to exchange %s with routing key %s: %w", 
+				name, binding.Exchange, binding.RoutingKey, err)
+		}
+	}
+	
+	return nil
 }
 
 // Connect establishes connection to the broker
@@ -301,24 +326,8 @@ func (s *subscriberAdapter) Subscribe(ctx context.Context, queue string, handler
 		return fmt.Errorf("failed to create channel: %w", err)
 	}
 
-	// Declare the queue to ensure it exists
-	args := make(amqp.Table)
-	for k, v := range options.Arguments {
-		args[k] = v
-	}
-	
-	_, err = channel.QueueDeclare(
-		queue,
-		options.Durable,    // durable
-		options.AutoDelete, // auto-delete
-		options.Exclusive,  // exclusive
-		false,              // no-wait
-		args,               // arguments
-	)
-	if err != nil {
-		channel.Close()
-		return fmt.Errorf("failed to declare queue %s: %w", queue, err)
-	}
+	// Queue should already exist from client initialization
+	// No need to declare here - just consume from existing queue
 
 	// Set QoS
 	if err := channel.Qos(options.PrefetchCount, 0, false); err != nil {

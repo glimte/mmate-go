@@ -79,11 +79,8 @@ func NewTransport(connectionString string, options ...TransportOption) (*Transpo
 	}
 
 	// Create publisher with configured options
-	publisherOpts := cfg.PublisherOptions
-	if cfg.EnableFIFO {
-		publisherOpts = append(publisherOpts, rabbitmq.WithFIFOMode(true))
-	}
-	publisher := rabbitmq.NewPublisher(pool, publisherOpts...)
+	// NOTE: FIFO mode only affects queue declaration, not publishing behavior
+	publisher := rabbitmq.NewPublisher(pool, cfg.PublisherOptions...)
 
 	// Create consumer
 	consumer := rabbitmq.NewConsumer(pool, cfg.ConsumerOptions...)

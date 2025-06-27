@@ -171,6 +171,11 @@ func (d *MessageDispatcher) UnregisterHandler(messageType contracts.Message, han
 	return fmt.Errorf("handler not found for message type: %s", typeName)
 }
 
+// Handle implements the MessageHandler interface by dispatching to registered handlers
+func (d *MessageDispatcher) Handle(ctx context.Context, msg contracts.Message) error {
+	return d.Dispatch(ctx, msg)
+}
+
 // Dispatch sends a message to all registered handlers
 func (d *MessageDispatcher) Dispatch(ctx context.Context, msg contracts.Message) error {
 	if msg == nil {

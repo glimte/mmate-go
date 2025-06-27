@@ -12,7 +12,7 @@ type Envelope struct {
 	CorrelationID string                 `json:"correlationId,omitempty"`
 	ReplyTo       string                 `json:"replyTo,omitempty"`
 	Headers       map[string]interface{} `json:"headers,omitempty"`
-	Body          json.RawMessage        `json:"body"`
+	Payload       json.RawMessage        `json:"payload"`
 }
 
 // MessageMetadata contains routing and processing information

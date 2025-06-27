@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/glimte/mmate-go/contracts"
-	"github.com/google/uuid"
 )
 
 // EnvelopeFactory creates message envelopes with proper metadata
@@ -82,20 +81,38 @@ func (f *DefaultEnvelopeFactory) CreateEnvelopeWithOptions(message contracts.Mes
 		return nil, fmt.Errorf("message cannot be nil")
 	}
 
-	// Serialize message to JSON
-	body, err := json.Marshal(message)
+	// Extract message-specific payload (everything except base fields)
+	messageData, err := json.Marshal(message)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal message: %w", err)
 	}
 
-	// Create envelope
+	// Parse message data to extract payload fields
+	var messageMap map[string]interface{}
+	if err := json.Unmarshal(messageData, &messageMap); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal message data: %w", err)
+	}
+
+	// Remove base message fields from payload
+	delete(messageMap, "id")
+	delete(messageMap, "timestamp")
+	delete(messageMap, "type")
+	delete(messageMap, "correlationId")
+
+	// Serialize the payload
+	payloadData, err := json.Marshal(messageMap)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	// Create envelope following wire format
 	envelope := &contracts.Envelope{
-		ID:            uuid.New().String(),
+		ID:            message.GetID(), // Use message ID, not a new one
 		Type:          message.GetType(),
 		CorrelationID: message.GetCorrelationID(),
-		Timestamp:     time.Now().UTC().Format(time.RFC3339),
+		Timestamp:     message.GetTimestamp().UTC().Format(time.RFC3339),
 		Headers:       make(map[string]interface{}),
-		Body:          body,
+		Payload:       payloadData,
 	}
 
 	// Add default headers
@@ -153,8 +170,8 @@ func (f *DefaultEnvelopeFactory) ExtractMessage(envelope *contracts.Envelope, me
 		return fmt.Errorf("messageType cannot be nil")
 	}
 
-	// Unmarshal body into the provided message type
-	err := json.Unmarshal(envelope.Body, messageType)
+	// Unmarshal payload into the provided message type
+	err := json.Unmarshal(envelope.Payload, messageType)
 	if err != nil {
 		return fmt.Errorf("failed to unmarshal message: %w", err)
 	}

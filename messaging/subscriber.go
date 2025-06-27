@@ -9,20 +9,17 @@ import (
 	"time"
 
 	"github.com/glimte/mmate-go/contracts"
-	"github.com/glimte/mmate-go/internal/rabbitmq"
-	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 // MessageSubscriber manages message consumption and routing to handlers
 type MessageSubscriber struct {
-	consumer        *rabbitmq.Consumer
+	transport       TransportSubscriber
 	dispatcher      *MessageDispatcher
 	logger          *slog.Logger
 	subscriptions   map[string]*Subscription
 	mu              sync.RWMutex
 	errorHandler    ErrorHandler
 	deadLetterQueue string
-	ackStrategy     rabbitmq.AcknowledgmentStrategy
 }
 
 // Subscription represents an active message subscription
@@ -106,17 +103,11 @@ func WithDeadLetterQueue(dlq string) SubscriberOption {
 	}
 }
 
-// WithSubscriberAckStrategy sets the acknowledgment strategy
-func WithSubscriberAckStrategy(strategy rabbitmq.AcknowledgmentStrategy) SubscriberOption {
-	return func(s *MessageSubscriber) {
-		s.ackStrategy = strategy
-	}
-}
 
 // NewMessageSubscriber creates a new message subscriber
-func NewMessageSubscriber(consumer *rabbitmq.Consumer, dispatcher *MessageDispatcher, options ...SubscriberOption) *MessageSubscriber {
+func NewMessageSubscriber(transport TransportSubscriber, dispatcher *MessageDispatcher, options ...SubscriberOption) *MessageSubscriber {
 	s := &MessageSubscriber{
-		consumer:      consumer,
+		transport:     transport,
 		dispatcher:    dispatcher,
 		logger:        slog.Default(),
 		subscriptions: make(map[string]*Subscription),
@@ -125,7 +116,6 @@ func NewMessageSubscriber(consumer *rabbitmq.Consumer, dispatcher *MessageDispat
 			Logger:     slog.Default(),
 		},
 		deadLetterQueue: "mmate.dlq",
-		ackStrategy:     rabbitmq.AckOnSuccess,
 	}
 
 	for _, opt := range options {
@@ -236,7 +226,7 @@ func (s *MessageSubscriber) Subscribe(ctx context.Context, queue string, message
 	}
 
 	// Start consuming
-	err := s.consumer.Subscribe(subCtx, queue, s.createDeliveryHandler(subscription))
+	err := s.transport.Subscribe(subCtx, queue, s.createDeliveryHandler(subscription), opts)
 	if err != nil {
 		cancel()
 		return fmt.Errorf("failed to subscribe to queue %s: %w", queue, err)
@@ -272,10 +262,10 @@ func (s *MessageSubscriber) Unsubscribe(queue string) error {
 	// Cancel the subscription
 	subscription.cancelFunc()
 
-	// Unsubscribe from consumer
-	err := s.consumer.Unsubscribe(queue)
+	// Unsubscribe from transport
+	err := s.transport.Unsubscribe(queue)
 	if err != nil {
-		s.logger.Warn("failed to unsubscribe from consumer",
+		s.logger.Warn("failed to unsubscribe from transport",
 			"queue", queue,
 			"error", err,
 		)
@@ -316,37 +306,17 @@ func (s *MessageSubscriber) Close() error {
 	return nil
 }
 
-// processMessages processes incoming messages for a subscription
-func (s *MessageSubscriber) processMessages(ctx context.Context, deliveryChan <-chan amqp.Delivery, subscription *Subscription) {
-	for {
-		select {
-		case <-ctx.Done():
-			s.logger.Debug("stopping message processing",
-				"queue", subscription.Queue,
-				"reason", ctx.Err(),
-			)
-			return
-		case delivery, ok := <-deliveryChan:
-			if !ok {
-				s.logger.Warn("delivery channel closed", "queue", subscription.Queue)
-				return
-			}
-
-			s.handleDelivery(ctx, delivery, subscription)
-		}
-	}
-}
 
 // handleDelivery handles a single message delivery
-func (s *MessageSubscriber) handleDelivery(ctx context.Context, delivery amqp.Delivery, subscription *Subscription) {
+func (s *MessageSubscriber) handleDelivery(ctx context.Context, delivery TransportDelivery, subscription *Subscription) {
 	// Parse envelope
 	var envelope contracts.Envelope
-	if err := json.Unmarshal(delivery.Body, &envelope); err != nil {
+	if err := json.Unmarshal(delivery.Body(), &envelope); err != nil {
 		s.logger.Error("failed to parse message envelope",
 			"queue", subscription.Queue,
 			"error", err,
 		)
-		s.nackMessage(delivery, false) // Don't requeue invalid messages
+		delivery.Reject(false) // Don't requeue invalid messages
 		return
 	}
 
@@ -358,7 +328,7 @@ func (s *MessageSubscriber) handleDelivery(ctx context.Context, delivery amqp.De
 			"messageType", envelope.Type,
 			"error", err,
 		)
-		s.nackMessage(delivery, false)
+		delivery.Reject(false)
 		return
 	}
 
@@ -376,17 +346,17 @@ func (s *MessageSubscriber) handleDelivery(ctx context.Context, delivery amqp.De
 		action := s.errorHandler.HandleError(ctx, msg, err)
 		switch action {
 		case Acknowledge:
-			s.ackMessage(delivery)
+			delivery.Acknowledge()
 		case Retry:
-			s.nackMessage(delivery, true) // Requeue for retry
+			delivery.Reject(true) // Requeue for retry
 		case Reject:
-			s.nackMessage(delivery, false) // Send to DLQ
+			delivery.Reject(false) // Send to DLQ
 		}
 		return
 	}
 
 	// Success - acknowledge message
-	s.ackMessage(delivery)
+	delivery.Acknowledge()
 
 	s.logger.Debug("message processed successfully",
 		"messageId", msg.GetID(),
@@ -397,51 +367,74 @@ func (s *MessageSubscriber) handleDelivery(ctx context.Context, delivery amqp.De
 
 // extractMessage extracts the concrete message from the envelope
 func (s *MessageSubscriber) extractMessage(envelope *contracts.Envelope) (contracts.Message, error) {
-	// This is a simplified implementation
-	// In a real implementation, you would need message type registration
-	// to properly deserialize to the correct concrete type
-
-	// Create base message and populate fields
-	msg := contracts.NewBaseMessage(envelope.Type)
-	msg.ID = envelope.ID
-	msg.CorrelationID = envelope.CorrelationID
-
-	if envelope.Timestamp != "" {
-		if timestamp, err := time.Parse(time.RFC3339, envelope.Timestamp); err == nil {
-			msg.Timestamp = timestamp
+	// Get the global type registry
+	registry := GetTypeRegistry()
+	
+	// Create instance of the registered type
+	instance, err := registry.CreateInstance(envelope.Type)
+	if err != nil {
+		// Fallback to base message if type not registered
+		msg := contracts.NewBaseMessage(envelope.Type)
+		msg.ID = envelope.ID
+		msg.CorrelationID = envelope.CorrelationID
+		if envelope.Timestamp != "" {
+			if timestamp, err := time.Parse(time.RFC3339, envelope.Timestamp); err == nil {
+				msg.Timestamp = timestamp
+			}
+		}
+		return &msg, nil
+	}
+	
+	// Create a complete message structure following wire format
+	messageData := make(map[string]interface{})
+	
+	// Set base message fields from envelope
+	messageData["id"] = envelope.ID
+	messageData["type"] = envelope.Type
+	messageData["timestamp"] = envelope.Timestamp
+	if envelope.CorrelationID != "" {
+		messageData["correlationId"] = envelope.CorrelationID
+	}
+	
+	// Merge payload fields
+	if envelope.Payload != nil {
+		var payloadMap map[string]interface{}
+		if err := json.Unmarshal(envelope.Payload, &payloadMap); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal payload: %w", err)
+		}
+		
+		// Merge payload fields into message data
+		for k, v := range payloadMap {
+			messageData[k] = v
 		}
 	}
-
-	// Return as base message for now
-	// In a real implementation, you'd deserialize to the specific type
-	return &msg, nil
+	
+	// Serialize complete message data and unmarshal into typed instance
+	completeMessageData, err := json.Marshal(messageData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal complete message data: %w", err)
+	}
+	
+	if err := json.Unmarshal(completeMessageData, instance); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal complete message into %s: %w", envelope.Type, err)
+	}
+	
+	// Ensure it's a message
+	msg, ok := instance.(contracts.Message)
+	if !ok {
+		return nil, fmt.Errorf("type %s does not implement Message interface", envelope.Type)
+	}
+	
+	return msg, nil
 }
 
-// createDeliveryHandler creates a delivery handler for the consumer
-func (s *MessageSubscriber) createDeliveryHandler(subscription *Subscription) func(ctx context.Context, delivery amqp.Delivery) error {
-	return func(ctx context.Context, delivery amqp.Delivery) error {
+// createDeliveryHandler creates a delivery handler for the transport
+func (s *MessageSubscriber) createDeliveryHandler(subscription *Subscription) func(delivery TransportDelivery) error {
+	return func(delivery TransportDelivery) error {
+		// Create a context for this delivery
+		ctx := context.Background()
 		s.handleDelivery(ctx, delivery, subscription)
 		return nil
 	}
 }
 
-// ackMessage acknowledges a message
-func (s *MessageSubscriber) ackMessage(delivery amqp.Delivery) {
-	if err := delivery.Ack(false); err != nil {
-		s.logger.Error("failed to ack message",
-			"deliveryTag", delivery.DeliveryTag,
-			"error", err,
-		)
-	}
-}
-
-// nackMessage negatively acknowledges a message
-func (s *MessageSubscriber) nackMessage(delivery amqp.Delivery, requeue bool) {
-	if err := delivery.Nack(false, requeue); err != nil {
-		s.logger.Error("failed to nack message",
-			"deliveryTag", delivery.DeliveryTag,
-			"requeue", requeue,
-			"error", err,
-		)
-	}
-}

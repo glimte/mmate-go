@@ -2,24 +2,22 @@ package messaging
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/glimte/mmate-go/contracts"
-	"github.com/glimte/mmate-go/internal/rabbitmq"
 	"github.com/glimte/mmate-go/internal/reliability"
-	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 // MessagePublisher provides high-level message publishing capabilities
 type MessagePublisher struct {
-	publisher      *rabbitmq.Publisher
+	transport      TransportPublisher
 	circuitBreaker *reliability.CircuitBreaker
 	retryPolicy    reliability.RetryPolicy
 	logger         *slog.Logger
 	defaultTTL     time.Duration
+	factory        EnvelopeFactory
 }
 
 // PublisherOption configures the MessagePublisher
@@ -54,12 +52,13 @@ func WithDefaultTTL(ttl time.Duration) PublisherOption {
 }
 
 // NewMessagePublisher creates a new message publisher
-func NewMessagePublisher(publisher *rabbitmq.Publisher, options ...PublisherOption) *MessagePublisher {
+func NewMessagePublisher(transport TransportPublisher, options ...PublisherOption) *MessagePublisher {
 	p := &MessagePublisher{
-		publisher:   publisher,
+		transport:   transport,
 		logger:      slog.Default(),
 		defaultTTL:  5 * time.Minute,
 		retryPolicy: reliability.NewExponentialBackoff(time.Second, 30*time.Second, 2.0, 3),
+		factory:     NewEnvelopeFactory(),
 	}
 
 	for _, opt := range options {
@@ -80,10 +79,10 @@ type PublishOptions struct {
 	ConfirmDelivery bool
 }
 
-// PublishOption configures publish behavior
+// PublishOption configures publish options
 type PublishOption func(*PublishOptions)
 
-// WithExchange sets the exchange name
+// WithExchange sets the exchange
 func WithExchange(exchange string) PublishOption {
 	return func(opts *PublishOptions) {
 		opts.Exchange = exchange
@@ -97,7 +96,7 @@ func WithRoutingKey(routingKey string) PublishOption {
 	}
 }
 
-// WithTTL sets the message time-to-live
+// WithTTL sets the message TTL
 func WithTTL(ttl time.Duration) PublishOption {
 	return func(opts *PublishOptions) {
 		opts.TTL = ttl
@@ -111,7 +110,7 @@ func WithPriority(priority uint8) PublishOption {
 	}
 }
 
-// WithPersistent sets the message as persistent
+// WithPersistent sets persistent delivery mode
 func WithPersistent(persistent bool) PublishOption {
 	return func(opts *PublishOptions) {
 		if persistent {
@@ -122,7 +121,7 @@ func WithPersistent(persistent bool) PublishOption {
 	}
 }
 
-// WithHeaders sets custom headers
+// WithHeaders sets additional headers
 func WithHeaders(headers map[string]interface{}) PublishOption {
 	return func(opts *PublishOptions) {
 		if opts.Headers == nil {
@@ -134,38 +133,19 @@ func WithHeaders(headers map[string]interface{}) PublishOption {
 	}
 }
 
-// WithConfirmDelivery enables publisher confirms
+// WithConfirmDelivery sets whether to confirm message delivery
 func WithConfirmDelivery(confirm bool) PublishOption {
 	return func(opts *PublishOptions) {
 		opts.ConfirmDelivery = confirm
 	}
 }
 
-// WithReplyTo sets the reply-to queue
-func WithReplyTo(replyTo string) PublishOption {
-	return func(opts *PublishOptions) {
-		if opts.Headers == nil {
-			opts.Headers = make(map[string]interface{})
-		}
-		opts.Headers["x-reply-to"] = replyTo
-	}
-}
-
-// WithCorrelationID sets the correlation ID
-func WithCorrelationID(correlationID string) PublishOption {
-	return func(opts *PublishOptions) {
-		if opts.Headers == nil {
-			opts.Headers = make(map[string]interface{})
-		}
-		opts.Headers["x-correlation-id"] = correlationID
-	}
-}
-
-// Publish publishes a message
+// Publish publishes a message with options
 func (p *MessagePublisher) Publish(ctx context.Context, msg contracts.Message, options ...PublishOption) error {
 	if msg == nil {
 		return fmt.Errorf("message cannot be nil")
 	}
+
 
 	// Apply default options
 	opts := PublishOptions{
@@ -182,40 +162,31 @@ func (p *MessagePublisher) Publish(ctx context.Context, msg contracts.Message, o
 		opt(&opts)
 	}
 
-	// Create envelope
-	envelope := p.createEnvelope(msg, &opts)
-
-	// Serialize envelope
-	body, err := json.Marshal(envelope)
-	if err != nil {
-		return fmt.Errorf("failed to serialize message: %w", err)
-	}
-
 	// Add standard headers
 	p.addStandardHeaders(&opts, msg)
-
-	// Create AMQP publishing message
-	publishing := amqp.Publishing{
-		Body:         body,
-		Headers:      opts.Headers,
-		ContentType:  "application/json",
-		DeliveryMode: opts.DeliveryMode,
-		Priority:     opts.Priority,
-	}
-	if opts.TTL > 0 {
-		publishing.Expiration = fmt.Sprintf("%d", opts.TTL.Milliseconds())
+	
+	// Create envelope with headers
+	envelope, err := p.factory.CreateEnvelopeWithOptions(msg, WithEnvelopeHeaders(opts.Headers))
+	if err != nil {
+		return fmt.Errorf("failed to create envelope: %w", err)
 	}
 
 	// Publish with reliability patterns
 	publishFunc := func() error {
-		return p.publisher.Publish(ctx, opts.Exchange, opts.RoutingKey, publishing)
+		p.logger.Debug("Publishing message",
+			"exchange", opts.Exchange,
+			"routingKey", opts.RoutingKey,
+			"messageId", msg.GetID(),
+			"messageType", msg.GetType(),
+		)
+		return p.transport.Publish(ctx, opts.Exchange, opts.RoutingKey, envelope)
 	}
 
 	// Apply circuit breaker if configured
 	if p.circuitBreaker != nil {
 		publishFunc = func() error {
 			return p.circuitBreaker.Execute(ctx, func() error {
-				return p.publisher.Publish(ctx, opts.Exchange, opts.RoutingKey, publishing)
+				return p.transport.Publish(ctx, opts.Exchange, opts.RoutingKey, envelope)
 			})
 		}
 	}
@@ -223,17 +194,15 @@ func (p *MessagePublisher) Publish(ctx context.Context, msg contracts.Message, o
 	// Apply retry policy
 	err = reliability.Retry(ctx, p.retryPolicy, publishFunc)
 	if err != nil {
-		p.logger.Error("failed to publish message",
+		p.logger.Error("Failed to publish message",
 			"messageId", msg.GetID(),
 			"messageType", msg.GetType(),
-			"exchange", opts.Exchange,
-			"routingKey", opts.RoutingKey,
 			"error", err,
 		)
-		return fmt.Errorf("failed to publish message %s: %w", msg.GetID(), err)
+		return fmt.Errorf("failed to publish message after retries: %w", err)
 	}
 
-	p.logger.Debug("message published successfully",
+	p.logger.Info("Message published successfully",
 		"messageId", msg.GetID(),
 		"messageType", msg.GetType(),
 		"exchange", opts.Exchange,
@@ -245,158 +214,28 @@ func (p *MessagePublisher) Publish(ctx context.Context, msg contracts.Message, o
 
 // PublishCommand publishes a command message
 func (p *MessagePublisher) PublishCommand(ctx context.Context, cmd contracts.Command, options ...PublishOption) error {
-	defaultOptions := []PublishOption{
+	defaultOpts := []PublishOption{
 		WithExchange("mmate.commands"),
 		WithRoutingKey(fmt.Sprintf("cmd.%s.%s", cmd.GetTargetService(), cmd.GetType())),
 	}
-
-	allOptions := append(defaultOptions, options...)
-	return p.Publish(ctx, cmd, allOptions...)
+	return p.Publish(ctx, cmd, append(defaultOpts, options...)...)
 }
 
 // PublishEvent publishes an event message
-func (p *MessagePublisher) PublishEvent(ctx context.Context, event contracts.Event, options ...PublishOption) error {
-	defaultOptions := []PublishOption{
+func (p *MessagePublisher) PublishEvent(ctx context.Context, evt contracts.Event, options ...PublishOption) error {
+	defaultOpts := []PublishOption{
 		WithExchange("mmate.events"),
-		WithRoutingKey(fmt.Sprintf("evt.%s.%s", event.GetAggregateID(), event.GetType())),
+		WithRoutingKey(fmt.Sprintf("evt.%s.%s", evt.GetAggregateID(), evt.GetType())),
 	}
-
-	allOptions := append(defaultOptions, options...)
-	return p.Publish(ctx, event, allOptions...)
+	return p.Publish(ctx, evt, append(defaultOpts, options...)...)
 }
 
-// PublishQuery publishes a query message
-func (p *MessagePublisher) PublishQuery(ctx context.Context, query contracts.Query, options ...PublishOption) error {
-	defaultOptions := []PublishOption{
-		WithExchange("mmate.queries"),
-		WithRoutingKey(fmt.Sprintf("qry.%s", query.GetType())),
-	}
-
-	allOptions := append(defaultOptions, options...)
-	return p.Publish(ctx, query, allOptions...)
-}
-
-// PublishReply publishes a reply message
-func (p *MessagePublisher) PublishReply(ctx context.Context, reply contracts.Reply, replyTo string, options ...PublishOption) error {
-	defaultOptions := []PublishOption{
-		WithExchange("mmate.replies"),
-		WithRoutingKey(replyTo),
-	}
-
-	allOptions := append(defaultOptions, options...)
-	return p.Publish(ctx, reply, allOptions...)
-}
-
-// PublishBatch publishes multiple messages in a batch
-func (p *MessagePublisher) PublishBatch(ctx context.Context, messages []contracts.Message, options ...PublishOption) error {
-	if len(messages) == 0 {
-		return nil
-	}
-
-	// Prepare all messages
-	var publishMessages []rabbitmq.PublishMessage
-
-	for _, msg := range messages {
-		if msg == nil {
-			continue
-		}
-
-		// Apply default options
-		opts := PublishOptions{
-			Exchange:        "mmate.messages",
-			RoutingKey:      p.getRoutingKey(msg),
-			TTL:             p.defaultTTL,
-			Priority:        0,
-			DeliveryMode:    2,
-			Headers:         make(map[string]interface{}),
-			ConfirmDelivery: true,
-		}
-
-		for _, opt := range options {
-			opt(&opts)
-		}
-
-		// Create envelope and serialize
-		envelope := p.createEnvelope(msg, &opts)
-		body, err := json.Marshal(envelope)
-		if err != nil {
-			return fmt.Errorf("failed to serialize message %s: %w", msg.GetID(), err)
-		}
-
-		// Add standard headers
-		p.addStandardHeaders(&opts, msg)
-
-		publishing := amqp.Publishing{
-			Body:         body,
-			Headers:      opts.Headers,
-			ContentType:  "application/json",
-			DeliveryMode: opts.DeliveryMode,
-			Priority:     opts.Priority,
-		}
-		if opts.TTL > 0 {
-			publishing.Expiration = fmt.Sprintf("%d", opts.TTL.Milliseconds())
-		}
-
-		publishMessages = append(publishMessages, rabbitmq.PublishMessage{
-			Exchange:   opts.Exchange,
-			RoutingKey: opts.RoutingKey,
-			Message:    publishing,
-		})
-	}
-
-	// Publish batch with reliability
-	publishFunc := func() error {
-		return p.publisher.PublishBatch(ctx, publishMessages)
-	}
-
-	// Apply circuit breaker if configured
-	if p.circuitBreaker != nil {
-		publishFunc = func() error {
-			return p.circuitBreaker.Execute(ctx, publishFunc)
-		}
-	}
-
-	// Apply retry policy
-	err := reliability.Retry(ctx, p.retryPolicy, publishFunc)
-	if err != nil {
-		p.logger.Error("failed to publish batch",
-			"messageCount", len(messages),
-			"error", err,
-		)
-		return fmt.Errorf("failed to publish batch of %d messages: %w", len(messages), err)
-	}
-
-	p.logger.Debug("batch published successfully",
-		"messageCount", len(publishMessages),
-	)
-
-	return nil
-}
-
-// createEnvelope creates a message envelope
-func (p *MessagePublisher) createEnvelope(msg contracts.Message, opts *PublishOptions) contracts.Envelope {
-	// Serialize the message to JSON
-	msgBytes, _ := json.Marshal(msg)
-
-	return contracts.Envelope{
-		ID:            msg.GetID(),
-		Type:          msg.GetType(),
-		Timestamp:     msg.GetTimestamp().UTC().Format(time.RFC3339),
-		CorrelationID: msg.GetCorrelationID(),
-		Headers:       opts.Headers,
-		Body:          msgBytes,
-	}
-}
-
-// addStandardHeaders adds standard messaging headers
+// addStandardHeaders adds standard message headers
 func (p *MessagePublisher) addStandardHeaders(opts *PublishOptions, msg contracts.Message) {
-	if opts.Headers == nil {
-		opts.Headers = make(map[string]interface{})
-	}
-
 	opts.Headers["message-id"] = msg.GetID()
 	opts.Headers["message-type"] = msg.GetType()
 	opts.Headers["timestamp"] = msg.GetTimestamp().UTC().Format(time.RFC3339)
+	opts.Headers["source"] = "mmate-go"
 
 	if correlationID := msg.GetCorrelationID(); correlationID != "" {
 		opts.Headers["correlation-id"] = correlationID
@@ -426,9 +265,30 @@ func (p *MessagePublisher) getRoutingKey(msg contracts.Message) string {
 	}
 }
 
+// PublishReply publishes a reply message
+func (p *MessagePublisher) PublishReply(ctx context.Context, reply contracts.Reply, replyTo string, options ...PublishOption) error {
+	defaultOpts := []PublishOption{
+		WithExchange(""),  // Default exchange for direct replies
+		WithRoutingKey(replyTo),
+	}
+	return p.Publish(ctx, reply, append(defaultOpts, options...)...)
+}
+
+// WithCorrelationID sets the correlation ID header
+func WithCorrelationID(correlationID string) PublishOption {
+	return func(opts *PublishOptions) {
+		opts.Headers["correlation-id"] = correlationID
+	}
+}
+
+// WithReplyTo sets the reply-to header
+func WithReplyTo(replyTo string) PublishOption {
+	return func(opts *PublishOptions) {
+		opts.Headers["reply-to"] = replyTo
+	}
+}
+
 // Close closes the publisher and releases resources
 func (p *MessagePublisher) Close() error {
-	// MessagePublisher doesn't hold direct resources to close
-	// The underlying rabbitmq.Publisher is managed by the channel pool
-	return nil
+	return p.transport.Close()
 }

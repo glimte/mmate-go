@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -15,6 +16,9 @@ type Publisher struct {
 	confirmTimeout time.Duration
 	publishTimeout time.Duration
 	maxRetries     int
+	fifoMode       bool
+	fifoChannel    *amqp.Channel
+	fifoMutex      sync.Mutex
 }
 
 // PublisherOption configures the publisher
@@ -52,6 +56,13 @@ func WithPublisherLogger(logger *slog.Logger) PublisherOption {
 func WithConfirmMode(enabled bool) PublisherOption {
 	return func(p *Publisher) {
 		// Confirm mode is handled per-publish, not at publisher level
+	}
+}
+
+// WithFIFOMode enables FIFO mode for strict message ordering
+func WithFIFOMode(enabled bool) PublisherOption {
+	return func(p *Publisher) {
+		p.fifoMode = enabled
 	}
 }
 
@@ -104,7 +115,8 @@ func (p *Publisher) Publish(ctx context.Context, exchange, routingKey string, ms
 
 // PublishBatch publishes multiple messages in a batch
 func (p *Publisher) PublishBatch(ctx context.Context, messages []PublishMessage) error {
-	ch, err := p.pool.Get(ctx)
+	// Get connection directly to avoid channel pool issues with confirms
+	conn, err := p.pool.manager.GetConnection()
 	if err != nil {
 		return &PublishError{
 			Exchange:   "batch",
@@ -114,7 +126,19 @@ func (p *Publisher) PublishBatch(ctx context.Context, messages []PublishMessage)
 			Timestamp:  time.Now(),
 		}
 	}
-	defer p.pool.Put(ch)
+
+	// Create dedicated channel for batch operation
+	ch, err := conn.Channel()
+	if err != nil {
+		return &PublishError{
+			Exchange:   "batch",
+			RoutingKey: "batch",
+			Mandatory:  false,
+			Err:        fmt.Errorf("failed to create channel: %w", err),
+			Timestamp:  time.Now(),
+		}
+	}
+	defer ch.Close()
 
 	// Enable confirms
 	if err := ch.Confirm(false); err != nil {
@@ -169,6 +193,22 @@ func (p *Publisher) PublishBatch(ctx context.Context, messages []PublishMessage)
 
 // publishWithConfirm publishes a single message with confirmation
 func (p *Publisher) publishWithConfirm(ctx context.Context, exchange, routingKey string, msg amqp.Publishing) error {
+	// In FIFO mode, use a single channel with mutex to maintain order
+	if p.fifoMode {
+		return p.publishFIFO(ctx, exchange, routingKey, msg)
+	}
+	
+	// TODO: Implement proper solution with dedicated publish channels
+	// Current implementation creates too many channels - this is a temporary fix
+	// 
+	// Better approach would be:
+	// 1. Maintain a pool of dedicated publish channels (separate from consumer channels)
+	// 2. Each goroutine gets its own channel (channels aren't thread-safe)
+	// 3. Use async confirms instead of blocking after each publish
+	// 4. Track outstanding confirms with sequence numbers
+	
+	// For now, use a channel from the pool but don't use confirms
+	// This avoids the deadlock but doesn't provide delivery guarantees
 	ch, err := p.pool.Get(ctx)
 	if err != nil {
 		return &PublishError{
@@ -181,16 +221,7 @@ func (p *Publisher) publishWithConfirm(ctx context.Context, exchange, routingKey
 	}
 	defer p.pool.Put(ch)
 
-	// Enable confirms
-	if err := ch.Confirm(false); err != nil {
-		return fmt.Errorf("failed to enable confirms: %w", err)
-	}
-
-	// Set up confirmation handling
-	confirms := ch.NotifyPublish(make(chan amqp.Confirmation, 1))
-	returns := ch.NotifyReturn(make(chan amqp.Return, 1))
-
-	// Publish message
+	// Publish without confirms for now
 	if err := ch.PublishWithContext(
 		ctx,
 		exchange,
@@ -202,20 +233,61 @@ func (p *Publisher) publishWithConfirm(ctx context.Context, exchange, routingKey
 		return fmt.Errorf("failed to publish: %w", err)
 	}
 
-	// Wait for confirmation
+	return nil
+}
+
+// publishFIFO publishes a message in FIFO mode using a single channel
+func (p *Publisher) publishFIFO(ctx context.Context, exchange, routingKey string, msg amqp.Publishing) error {
+	p.fifoMutex.Lock()
+	defer p.fifoMutex.Unlock()
+	
+	// Initialize FIFO channel if needed
+	if p.fifoChannel == nil {
+		conn, err := p.pool.manager.GetConnection()
+		if err != nil {
+			return fmt.Errorf("failed to get connection: %w", err)
+		}
+		
+		ch, err := conn.Channel()
+		if err != nil {
+			return fmt.Errorf("failed to create FIFO channel: %w", err)
+		}
+		
+		// Enable confirms for FIFO channel
+		if err := ch.Confirm(false); err != nil {
+			ch.Close()
+			return fmt.Errorf("failed to enable confirms: %w", err)
+		}
+		
+		p.fifoChannel = ch
+	}
+	
+	// Set up confirmation handling
+	confirms := p.fifoChannel.NotifyPublish(make(chan amqp.Confirmation, 1))
+	
+	// Publish message
+	if err := p.fifoChannel.PublishWithContext(
+		ctx,
+		exchange,
+		routingKey,
+		false, // mandatory
+		false, // immediate
+		msg,
+	); err != nil {
+		return fmt.Errorf("failed to publish: %w", err)
+	}
+	
+	// Wait for confirmation synchronously to maintain order
 	select {
 	case confirm := <-confirms:
 		if !confirm.Ack {
 			return fmt.Errorf("message was nacked")
 		}
 		return nil
-
-	case ret := <-returns:
-		return fmt.Errorf("message returned: %s", ret.ReplyText)
-
+		
 	case <-time.After(p.confirmTimeout):
 		return fmt.Errorf("timeout waiting for confirmation")
-
+		
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -223,7 +295,18 @@ func (p *Publisher) publishWithConfirm(ctx context.Context, exchange, routingKey
 
 // Close closes the publisher and releases resources
 func (p *Publisher) Close() error {
-	// Publisher doesn't hold direct resources to close
+	// Close FIFO channel if it exists
+	if p.fifoMode && p.fifoChannel != nil {
+		p.fifoMutex.Lock()
+		defer p.fifoMutex.Unlock()
+		
+		if p.fifoChannel != nil {
+			err := p.fifoChannel.Close()
+			p.fifoChannel = nil
+			return err
+		}
+	}
+	
 	// The underlying channel pool is managed separately
 	return nil
 }

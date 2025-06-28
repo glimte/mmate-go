@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/glimte/mmate-go/bridge"
 	"github.com/glimte/mmate-go/messaging"
 	rabbitmqTransport "github.com/glimte/mmate-go/transports/rabbitmq"
 	"github.com/glimte/mmate-go/internal/rabbitmq"
@@ -26,11 +27,12 @@ import (
 
 // Client provides the main entry point for mmate-go
 type Client struct {
-	transport  messaging.Transport
-	publisher  *messaging.MessagePublisher
-	subscriber *messaging.MessageSubscriber
-	dispatcher *messaging.MessageDispatcher
-	serviceName string
+	transport    messaging.Transport
+	publisher    *messaging.MessagePublisher
+	subscriber   *messaging.MessageSubscriber
+	dispatcher   *messaging.MessageDispatcher
+	bridge       *bridge.SyncAsyncBridge
+	serviceName  string
 	receiveQueue string
 }
 
@@ -142,8 +144,34 @@ func (c *Client) ServiceQueue() string {
 	return c.receiveQueue
 }
 
+// Bridge returns the sync-async bridge for request-response patterns
+func (c *Client) Bridge() *bridge.SyncAsyncBridge {
+	if c.bridge == nil {
+		// Check if publisher and subscriber are available
+		if c.publisher == nil || c.subscriber == nil {
+			return nil
+		}
+		
+		var err error
+		c.bridge, err = bridge.NewSyncAsyncBridge(
+			c.publisher,
+			c.subscriber,
+			nil, // logger - bridge accepts nil
+		)
+		if err != nil {
+			// Bridge creation failed - this shouldn't happen with valid components
+			// Log error but don't panic, return nil to indicate failure
+			return nil
+		}
+	}
+	return c.bridge
+}
+
 // Close closes all resources
 func (c *Client) Close() error {
+	if c.bridge != nil {
+		c.bridge.Close()
+	}
 	if c.publisher != nil {
 		c.publisher.Close()
 	}

@@ -23,7 +23,7 @@ go.work
 /dist/
 mmate-monitor
 pubsub
-
+CLAUDE.md
 # IDE files
 .vscode/
 .idea/

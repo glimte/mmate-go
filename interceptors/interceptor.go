@@ -427,6 +427,45 @@ func (i *CircuitBreakerInterceptor) Name() string {
 	return "CircuitBreakerInterceptor"
 }
 
+// Pipeline manages a collection of interceptors in execution order
+type Pipeline struct {
+	interceptors []Interceptor
+	logger       *slog.Logger
+}
+
+// NewPipeline creates a new interceptor pipeline
+func NewPipeline(interceptors ...Interceptor) *Pipeline {
+	return &Pipeline{
+		interceptors: interceptors,
+		logger:       slog.Default(),
+	}
+}
+
+// Use adds an interceptor to the pipeline
+func (p *Pipeline) Use(interceptor Interceptor) *Pipeline {
+	p.interceptors = append(p.interceptors, interceptor)
+	return p
+}
+
+// Execute executes the pipeline with the given handler as the final step
+func (p *Pipeline) Execute(ctx context.Context, msg contracts.Message, finalHandler MessageHandler) error {
+	if len(p.interceptors) == 0 {
+		return finalHandler.Handle(ctx, msg)
+	}
+
+	// Build the chain in reverse order
+	handler := finalHandler
+	for i := len(p.interceptors) - 1; i >= 0; i-- {
+		interceptor := p.interceptors[i]
+		currentHandler := handler
+		handler = MessageHandlerFunc(func(ctx context.Context, msg contracts.Message) error {
+			return interceptor.Intercept(ctx, msg, currentHandler)
+		})
+	}
+
+	return handler.Handle(ctx, msg)
+}
+
 // Default interceptor chain builder
 
 // DefaultInterceptorChainBuilder builds a common interceptor chain

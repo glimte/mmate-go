@@ -26,17 +26,20 @@ import (
 	"github.com/glimte/mmate-go/internal/rabbitmq"
 	"github.com/glimte/mmate-go/interceptors"
 	"github.com/glimte/mmate-go/internal/reliability"
+	"github.com/glimte/mmate-go/monitor"
 )
 
 // Client provides the main entry point for mmate-go
 type Client struct {
-	transport    messaging.Transport
-	publisher    *messaging.MessagePublisher
-	subscriber   *messaging.MessageSubscriber
-	dispatcher   *messaging.MessageDispatcher
-	bridge       *bridge.SyncAsyncBridge
-	serviceName  string
-	receiveQueue string
+	transport        messaging.Transport
+	publisher        *messaging.MessagePublisher
+	subscriber       *messaging.MessageSubscriber
+	dispatcher       *messaging.MessageDispatcher
+	bridge           *bridge.SyncAsyncBridge
+	serviceName      string
+	receiveQueue     string
+	metricsCollector interceptors.MetricsCollector
+	connectionString string // Store for monitoring access
 }
 
 // NewClient creates a new mmate client with default RabbitMQ transport
@@ -75,12 +78,26 @@ func NewClientWithOptions(connectionString string, options ...ClientOption) (*Cl
 	// Create dispatcher
 	dispatcher := messaging.NewMessageDispatcher()
 
+	// Determine which metrics collector to use (shared across all pipelines)
+	var sharedMetricsCollector interceptors.MetricsCollector
+	if cfg.metricsCollector != nil {
+		sharedMetricsCollector = cfg.metricsCollector
+	} else if cfg.enableDefaultMetrics {
+		sharedMetricsCollector = monitor.NewSimpleMetricsCollector()
+	}
+
 	// Create publisher with interceptors if configured
 	publisherOpts := []messaging.PublisherOption{
 		messaging.WithPublisherLogger(cfg.logger),
 	}
 	if cfg.publishPipeline != nil {
 		publisherOpts = append(publisherOpts, messaging.WithPublisherInterceptors(cfg.publishPipeline))
+	} else if sharedMetricsCollector != nil {
+		// Create default pipeline with metrics interceptor for publisher
+		pipeline := interceptors.NewPipeline()
+		metricsInterceptor := interceptors.NewMetricsInterceptor(sharedMetricsCollector)
+		pipeline.Use(metricsInterceptor)
+		publisherOpts = append(publisherOpts, messaging.WithPublisherInterceptors(pipeline))
 	}
 	
 	publisher := messaging.NewMessagePublisher(
@@ -98,12 +115,18 @@ func NewClientWithOptions(connectionString string, options ...ClientOption) (*Cl
 		subscriberOpts = append(subscriberOpts, messaging.WithDLQHandler(cfg.dlqHandler))
 	}
 	
-	// Create default pipeline with retry if enabled
+	// Create default pipeline with interceptors if enabled
 	if cfg.subscribePipeline != nil {
 		subscriberOpts = append(subscriberOpts, messaging.WithSubscriberInterceptors(cfg.subscribePipeline))
-	} else if cfg.enableDefaultRetry || cfg.retryPolicy != nil {
-		// Create default pipeline with retry interceptor
+	} else if cfg.enableDefaultRetry || cfg.retryPolicy != nil || sharedMetricsCollector != nil {
+		// Create default pipeline with interceptors
 		pipeline := interceptors.NewPipeline()
+		
+		// Add metrics interceptor first (to measure everything)
+		if sharedMetricsCollector != nil {
+			metricsInterceptor := interceptors.NewMetricsInterceptor(sharedMetricsCollector)
+			pipeline.Use(metricsInterceptor)
+		}
 		
 		// Add retry interceptor if configured
 		if cfg.retryPolicy != nil {
@@ -150,12 +173,14 @@ func NewClientWithOptions(connectionString string, options ...ClientOption) (*Cl
 	}
 
 	return &Client{
-		transport:    transport,
-		publisher:    publisher,
-		subscriber:   subscriber,
-		dispatcher:   dispatcher,
-		serviceName:  cfg.serviceName,
-		receiveQueue: queueName,
+		transport:        transport,
+		publisher:        publisher,
+		subscriber:       subscriber,
+		dispatcher:       dispatcher,
+		serviceName:      cfg.serviceName,
+		receiveQueue:     queueName,
+		metricsCollector: sharedMetricsCollector,
+		connectionString: connectionString,
 	}, nil
 }
 
@@ -207,6 +232,100 @@ func (c *Client) Bridge() *bridge.SyncAsyncBridge {
 	return c.bridge
 }
 
+// MetricsCollector returns the metrics collector if metrics are enabled
+func (c *Client) MetricsCollector() interceptors.MetricsCollector {
+	return c.metricsCollector
+}
+
+// GetMetricsSummary returns a summary of collected metrics (if using SimpleMetricsCollector)
+func (c *Client) GetMetricsSummary() *monitor.MetricsSummary {
+	if simpleCollector, ok := c.metricsCollector.(*monitor.SimpleMetricsCollector); ok {
+		summary := simpleCollector.GetMetricsSummary()
+		return &summary
+	}
+	return nil
+}
+
+// NewServiceMonitor creates a service-scoped monitor for this client
+// This provides safe, service-scoped access to RabbitMQ monitoring without mastodon behavior
+func (c *Client) NewServiceMonitor() (*monitor.ServiceMonitor, error) {
+	// Extract channel pool from the transport
+	rabbitmqTransport, ok := c.transport.(*rabbitmqTransport.Transport)
+	if !ok {
+		return nil, fmt.Errorf("service monitoring requires RabbitMQ transport")
+	}
+	
+	// Get the channel pool from the transport
+	channelPool, err := c.getChannelPoolFromTransport(rabbitmqTransport)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get channel pool: %w", err)
+	}
+	
+	return monitor.NewServiceMonitorFromChannelPool(c.serviceName, c.receiveQueue, channelPool), nil
+}
+
+// GetServiceMetrics returns combined local and queue metrics for this service only
+func (c *Client) GetServiceMetrics(ctx context.Context) (*monitor.ServiceMetrics, error) {
+	serviceMonitor, err := c.NewServiceMonitor()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create service monitor: %w", err)
+	}
+
+	localMetrics := c.GetMetricsSummary()
+	return serviceMonitor.ServiceMetrics(ctx, localMetrics)
+}
+
+// GetServiceHealth returns health status for this service's queue only
+func (c *Client) GetServiceHealth(ctx context.Context) (*monitor.ServiceHealth, error) {
+	serviceMonitor, err := c.NewServiceMonitor()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create service monitor: %w", err)
+	}
+
+	return serviceMonitor.ServiceQueueHealth(ctx)
+}
+
+// GetMyConsumerStats returns consumer statistics for this service's queues only
+func (c *Client) GetMyConsumerStats(ctx context.Context) (*monitor.ConsumerStats, error) {
+	serviceMonitor, err := c.NewServiceMonitor()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create service monitor: %w", err)
+	}
+
+	return serviceMonitor.GetMyConsumerStats(ctx)
+}
+
+// GetAdvancedMetrics returns advanced metrics analysis if available
+func (c *Client) GetAdvancedMetrics() *monitor.AdvancedMetricsReport {
+	if advancedCollector, ok := c.metricsCollector.(monitor.AdvancedMetricsCollector); ok {
+		return &monitor.AdvancedMetricsReport{
+			LatencyStats:   advancedCollector.GetLatencyPercentiles(),
+			ThroughputStats: advancedCollector.GetThroughputStats(),
+			ErrorAnalysis:  advancedCollector.GetErrorAnalysis(),
+			CollectedAt:    time.Now(),
+		}
+	}
+	return nil
+}
+
+// getChannelPoolFromTransport creates a channel pool for monitoring purposes
+func (c *Client) getChannelPoolFromTransport(transport *rabbitmqTransport.Transport) (*rabbitmq.ChannelPool, error) {
+	// Create a new connection manager for monitoring
+	// This ensures monitoring doesn't interfere with the main transport
+	connManager := rabbitmq.NewConnectionManager(c.connectionString)
+	if err := connManager.Connect(context.Background()); err != nil {
+		return nil, fmt.Errorf("failed to connect for monitoring: %w", err)
+	}
+	
+	channelPool, err := rabbitmq.NewChannelPool(connManager)
+	if err != nil {
+		connManager.Close()
+		return nil, fmt.Errorf("failed to create channel pool: %w", err)
+	}
+	
+	return channelPool, nil
+}
+
 // Close closes all resources
 func (c *Client) Close() error {
 	if c.bridge != nil {
@@ -235,6 +354,8 @@ type clientConfig struct {
 	retryPolicy        reliability.RetryPolicy
 	dlqHandler         *reliability.DLQHandler
 	enableDefaultRetry bool
+	metricsCollector   interceptors.MetricsCollector
+	enableDefaultMetrics bool
 }
 
 // ClientOption configures the client
@@ -315,5 +436,19 @@ func WithDLQHandler(handler *reliability.DLQHandler) ClientOption {
 func WithDefaultRetry() ClientOption {
 	return func(cfg *clientConfig) {
 		cfg.enableDefaultRetry = true
+	}
+}
+
+// WithMetrics sets a custom metrics collector
+func WithMetrics(collector interceptors.MetricsCollector) ClientOption {
+	return func(cfg *clientConfig) {
+		cfg.metricsCollector = collector
+	}
+}
+
+// WithDefaultMetrics enables default metrics collection
+func WithDefaultMetrics() ClientOption {
+	return func(cfg *clientConfig) {
+		cfg.enableDefaultMetrics = true
 	}
 }

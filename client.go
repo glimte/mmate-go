@@ -18,11 +18,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/glimte/mmate-go/bridge"
 	"github.com/glimte/mmate-go/messaging"
 	rabbitmqTransport "github.com/glimte/mmate-go/transports/rabbitmq"
 	"github.com/glimte/mmate-go/internal/rabbitmq"
+	"github.com/glimte/mmate-go/interceptors"
+	"github.com/glimte/mmate-go/internal/reliability"
 )
 
 // Client provides the main entry point for mmate-go
@@ -72,17 +75,54 @@ func NewClientWithOptions(connectionString string, options ...ClientOption) (*Cl
 	// Create dispatcher
 	dispatcher := messaging.NewMessageDispatcher()
 
-	// Create publisher
+	// Create publisher with interceptors if configured
+	publisherOpts := []messaging.PublisherOption{
+		messaging.WithPublisherLogger(cfg.logger),
+	}
+	if cfg.publishPipeline != nil {
+		publisherOpts = append(publisherOpts, messaging.WithPublisherInterceptors(cfg.publishPipeline))
+	}
+	
 	publisher := messaging.NewMessagePublisher(
 		transport.Publisher(),
-		messaging.WithPublisherLogger(cfg.logger),
+		publisherOpts...,
 	)
 
-	// Create subscriber
+	// Create subscriber with interceptors and DLQ handler if configured
+	subscriberOpts := []messaging.SubscriberOption{
+		messaging.WithSubscriberLogger(cfg.logger),
+	}
+	
+	// Add DLQ handler if configured
+	if cfg.dlqHandler != nil {
+		subscriberOpts = append(subscriberOpts, messaging.WithDLQHandler(cfg.dlqHandler))
+	}
+	
+	// Create default pipeline with retry if enabled
+	if cfg.subscribePipeline != nil {
+		subscriberOpts = append(subscriberOpts, messaging.WithSubscriberInterceptors(cfg.subscribePipeline))
+	} else if cfg.enableDefaultRetry || cfg.retryPolicy != nil {
+		// Create default pipeline with retry interceptor
+		pipeline := interceptors.NewPipeline()
+		
+		// Add retry interceptor if configured
+		if cfg.retryPolicy != nil {
+			retryInterceptor := interceptors.NewRetryInterceptor(cfg.retryPolicy).WithLogger(cfg.logger)
+			pipeline.Use(retryInterceptor)
+		} else if cfg.enableDefaultRetry {
+			// Use default retry policy
+			defaultPolicy := reliability.NewExponentialBackoff(100*time.Millisecond, 30*time.Second, 2.0, 3)
+			retryInterceptor := interceptors.NewRetryInterceptor(defaultPolicy).WithLogger(cfg.logger)
+			pipeline.Use(retryInterceptor)
+		}
+		
+		subscriberOpts = append(subscriberOpts, messaging.WithSubscriberInterceptors(pipeline))
+	}
+	
 	subscriber := messaging.NewMessageSubscriber(
 		transport.Subscriber(),
 		dispatcher,
-		messaging.WithSubscriberLogger(cfg.logger),
+		subscriberOpts...,
 	)
 	
 	// Create the service's receive queue automatically
@@ -186,10 +226,15 @@ func (c *Client) Close() error {
 
 // clientConfig holds client configuration
 type clientConfig struct {
-	logger      *slog.Logger
-	enableFIFO  bool
-	serviceName string
-	queueBindings []messaging.QueueBinding
+	logger             *slog.Logger
+	enableFIFO         bool
+	serviceName        string
+	queueBindings      []messaging.QueueBinding
+	publishPipeline    *interceptors.Pipeline
+	subscribePipeline  *interceptors.Pipeline
+	retryPolicy        reliability.RetryPolicy
+	dlqHandler         *reliability.DLQHandler
+	enableDefaultRetry bool
 }
 
 // ClientOption configures the client
@@ -227,5 +272,48 @@ func WithServiceName(name string) ClientOption {
 func WithQueueBindings(bindings ...messaging.QueueBinding) ClientOption {
 	return func(cfg *clientConfig) {
 		cfg.queueBindings = bindings
+	}
+}
+
+// WithInterceptors sets both publish and subscribe interceptor pipelines
+func WithInterceptors(pipeline *interceptors.Pipeline) ClientOption {
+	return func(cfg *clientConfig) {
+		cfg.publishPipeline = pipeline
+		cfg.subscribePipeline = pipeline
+	}
+}
+
+// WithPublishInterceptors sets the publish interceptor pipeline
+func WithPublishInterceptors(pipeline *interceptors.Pipeline) ClientOption {
+	return func(cfg *clientConfig) {
+		cfg.publishPipeline = pipeline
+	}
+}
+
+// WithSubscribeInterceptors sets the subscribe interceptor pipeline  
+func WithSubscribeInterceptors(pipeline *interceptors.Pipeline) ClientOption {
+	return func(cfg *clientConfig) {
+		cfg.subscribePipeline = pipeline
+	}
+}
+
+// WithRetryPolicy sets the retry policy for message processing
+func WithRetryPolicy(policy reliability.RetryPolicy) ClientOption {
+	return func(cfg *clientConfig) {
+		cfg.retryPolicy = policy
+	}
+}
+
+// WithDLQHandler sets the DLQ handler for failed messages
+func WithDLQHandler(handler *reliability.DLQHandler) ClientOption {
+	return func(cfg *clientConfig) {
+		cfg.dlqHandler = handler
+	}
+}
+
+// WithDefaultRetry enables default retry interceptor
+func WithDefaultRetry() ClientOption {
+	return func(cfg *clientConfig) {
+		cfg.enableDefaultRetry = true
 	}
 }

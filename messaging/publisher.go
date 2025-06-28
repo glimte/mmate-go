@@ -8,6 +8,7 @@ import (
 
 	"github.com/glimte/mmate-go/contracts"
 	"github.com/glimte/mmate-go/internal/reliability"
+	"github.com/glimte/mmate-go/interceptors"
 )
 
 // MessagePublisher provides high-level message publishing capabilities
@@ -18,6 +19,7 @@ type MessagePublisher struct {
 	logger         *slog.Logger
 	defaultTTL     time.Duration
 	factory        EnvelopeFactory
+	pipeline       *interceptors.Pipeline
 }
 
 // PublisherOption configures the MessagePublisher
@@ -48,6 +50,13 @@ func WithRetryPolicy(policy reliability.RetryPolicy) PublisherOption {
 func WithDefaultTTL(ttl time.Duration) PublisherOption {
 	return func(p *MessagePublisher) {
 		p.defaultTTL = ttl
+	}
+}
+
+// WithPublisherInterceptors sets the interceptor pipeline for publishing
+func WithPublisherInterceptors(pipeline *interceptors.Pipeline) PublisherOption {
+	return func(p *MessagePublisher) {
+		p.pipeline = pipeline
 	}
 }
 
@@ -146,7 +155,19 @@ func (p *MessagePublisher) Publish(ctx context.Context, msg contracts.Message, o
 		return fmt.Errorf("message cannot be nil")
 	}
 
+	// Execute through interceptor pipeline if configured
+	if p.pipeline != nil {
+		return p.pipeline.Execute(ctx, msg, interceptors.MessageHandlerFunc(func(ctx context.Context, msg contracts.Message) error {
+			return p.publishInternal(ctx, msg, options...)
+		}))
+	}
 
+	// Direct execution without interceptors
+	return p.publishInternal(ctx, msg, options...)
+}
+
+// publishInternal handles the actual publishing logic
+func (p *MessagePublisher) publishInternal(ctx context.Context, msg contracts.Message, options ...PublishOption) error {
 	// Apply default options
 	opts := PublishOptions{
 		Exchange:        "mmate.messages",

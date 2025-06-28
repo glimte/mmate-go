@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/glimte/mmate-go/contracts"
+	"github.com/glimte/mmate-go/interceptors"
+	"github.com/glimte/mmate-go/internal/reliability"
 )
 
 // MessageSubscriber manages message consumption and routing to handlers
@@ -20,6 +22,8 @@ type MessageSubscriber struct {
 	mu              sync.RWMutex
 	errorHandler    ErrorHandler
 	deadLetterQueue string
+	pipeline        *interceptors.Pipeline
+	dlqHandler      *reliability.DLQHandler
 }
 
 // Subscription represents an active message subscription
@@ -100,6 +104,20 @@ func WithErrorHandler(errorHandler ErrorHandler) SubscriberOption {
 func WithDeadLetterQueue(dlq string) SubscriberOption {
 	return func(s *MessageSubscriber) {
 		s.deadLetterQueue = dlq
+	}
+}
+
+// WithSubscriberInterceptors sets the interceptor pipeline for message consumption
+func WithSubscriberInterceptors(pipeline *interceptors.Pipeline) SubscriberOption {
+	return func(s *MessageSubscriber) {
+		s.pipeline = pipeline
+	}
+}
+
+// WithDLQHandler sets the DLQ handler for failed message processing
+func WithDLQHandler(dlqHandler *reliability.DLQHandler) SubscriberOption {
+	return func(s *MessageSubscriber) {
+		s.dlqHandler = dlqHandler
 	}
 }
 
@@ -336,8 +354,13 @@ func (s *MessageSubscriber) handleDelivery(ctx context.Context, delivery Transpo
 		return
 	}
 
-	// Process message through handler
-	err = subscription.Handler.Handle(ctx, msg)
+	// Process message through interceptor pipeline if configured
+	if s.pipeline != nil {
+		err = s.pipeline.Execute(ctx, msg, subscription.Handler)
+	} else {
+		err = subscription.Handler.Handle(ctx, msg)
+	}
+	
 	if err != nil {
 		s.logger.Error("handler failed",
 			"messageId", msg.GetID(),

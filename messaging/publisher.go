@@ -221,6 +221,15 @@ func (p *MessagePublisher) PublishCommand(ctx context.Context, cmd contracts.Com
 	return p.Publish(ctx, cmd, append(defaultOpts, options...)...)
 }
 
+// PublishQuery publishes a query message
+func (p *MessagePublisher) PublishQuery(ctx context.Context, query contracts.Query, options ...PublishOption) error {
+	defaultOpts := []PublishOption{
+		WithExchange("mmate.queries"),
+		WithRoutingKey(fmt.Sprintf("qry.%s", query.GetType())),
+	}
+	return p.Publish(ctx, query, append(defaultOpts, options...)...)
+}
+
 // PublishEvent publishes an event message
 func (p *MessagePublisher) PublishEvent(ctx context.Context, evt contracts.Event, options ...PublishOption) error {
 	defaultOpts := []PublishOption{

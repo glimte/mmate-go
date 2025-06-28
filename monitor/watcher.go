@@ -2,173 +2,98 @@ package monitor
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"os/exec"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
 )
 
-// QueueWatcher monitors queue metrics in real-time
-type QueueWatcher struct {
-	client   *RabbitMQClient
-	interval time.Duration
+// QueueMetrics represents queue monitoring data
+type QueueMetrics struct {
+	Name         string    `json:"name"`
+	Messages     int       `json:"messages"`
+	Consumers    int       `json:"consumers"`
+	MessageRate  float64   `json:"message_rate"`
+	Memory       int64     `json:"memory"`
+	State        string    `json:"state"`
+	Timestamp    time.Time `json:"timestamp"`
 }
 
-// NewQueueWatcher creates a new queue watcher
-func NewQueueWatcher(client *RabbitMQClient, interval time.Duration) *QueueWatcher {
-	return &QueueWatcher{
-		client:   client,
-		interval: interval,
+// QueueSummary represents aggregated queue metrics
+type QueueSummary struct {
+	TotalQueues    int           `json:"total_queues"`
+	TotalMessages  int           `json:"total_messages"`
+	TotalConsumers int           `json:"total_consumers"`
+	Queues         []QueueMetrics `json:"queues"`
+	Timestamp      time.Time     `json:"timestamp"`
+}
+
+// QueueMonitor provides queue monitoring functionality (library only)
+type QueueMonitor struct {
+	client RabbitMQClient
+}
+
+// NewQueueMonitor creates a new queue monitor
+func NewQueueMonitor(client RabbitMQClient) *QueueMonitor {
+	return &QueueMonitor{
+		client: client,
 	}
 }
 
-// Watch continuously monitors queues
-func (w *QueueWatcher) Watch(ctx context.Context, queueFilter []string) error {
-	// Clear screen initially
-	clearScreen()
-
-	ticker := time.NewTicker(w.interval)
-	defer ticker.Stop()
-
-	// Initial display
-	if err := w.displayQueues(ctx, queueFilter); err != nil {
-		return err
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			clearScreen()
-			if err := w.displayQueues(ctx, queueFilter); err != nil {
-				// Don't exit on error, just display it
-				fmt.Printf("Error: %v\n", err)
-			}
-		}
-	}
-}
-
-func (w *QueueWatcher) displayQueues(ctx context.Context, queueFilter []string) error {
-	queues, err := w.client.ListQueues(ctx)
+// GetQueueMetrics retrieves current queue metrics
+func (m *QueueMonitor) GetQueueMetrics(ctx context.Context, queueFilters []string) (*QueueSummary, error) {
+	queues, err := m.client.ListQueues(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	// Filter queues if specified
-	if len(queueFilter) > 0 {
-		filtered := make([]QueueInfo, 0)
-		filterMap := make(map[string]bool)
-		for _, f := range queueFilter {
-			filterMap[f] = true
+	// Convert to QueueMetrics and filter
+	metrics := make([]QueueMetrics, 0)
+	for _, q := range queues {
+		if len(queueFilters) == 0 || m.matchesFilter(q.Name, queueFilters) {
+			metrics = append(metrics, QueueMetrics{
+				Name:        q.Name,
+				Messages:    q.Messages,
+				Consumers:   q.Consumers,
+				MessageRate: q.MessageRate,
+				Memory:      q.Memory,
+				State:       q.State,
+				Timestamp:   time.Now(),
+			})
 		}
-		
-		for _, q := range queues {
-			if filterMap[q.Name] {
-				filtered = append(filtered, q)
-			} else {
-				// Also check for pattern matching
-				for _, pattern := range queueFilter {
-					if matched, _ := matchPattern(q.Name, pattern); matched {
-						filtered = append(filtered, q)
-						break
-					}
-				}
-			}
-		}
-		queues = filtered
 	}
 
 	// Sort by message count (descending)
-	sort.Slice(queues, func(i, j int) bool {
-		return queues[i].Messages > queues[j].Messages
+	sort.Slice(metrics, func(i, j int) bool {
+		return metrics[i].Messages > metrics[j].Messages
 	})
 
-	// Display header
-	fmt.Printf("Queue Monitor - %s\n", time.Now().Format("2006-01-02 15:04:05"))
-	fmt.Println(strings.Repeat("=", 100))
-	
-	// Summary
-	totalMessages := 0
-	totalConsumers := 0
-	for _, q := range queues {
-		totalMessages += q.Messages
-		totalConsumers += q.Consumers
+	// Calculate summary
+	summary := &QueueSummary{
+		TotalQueues: len(metrics),
+		Queues:      metrics,
+		Timestamp:   time.Now(),
 	}
-	
-	fmt.Printf("Total Queues: %d | Total Messages: %d | Total Consumers: %d\n", 
-		len(queues), totalMessages, totalConsumers)
-	fmt.Println(strings.Repeat("-", 100))
 
-	// Queue details
-	if len(queues) == 0 {
-		fmt.Println("No queues found matching filter")
-	} else {
-		fmt.Printf("%-40s %10s %10s %10s %15s %10s\n", 
-			"Queue Name", "Messages", "Ready", "Consumers", "Msg/sec", "Memory(KB)")
-		fmt.Println(strings.Repeat("-", 100))
-		
-		for _, q := range queues {
-			// Highlight queues with high message count
-			highlight := ""
-			if q.Messages > 1000 {
-				highlight = "*"
-			} else if q.Messages > 100 {
-				highlight = "+"
-			}
-			
-			// Color coding for queue state
-			stateColor := ""
-			switch q.State {
-			case "running":
-				stateColor = "\033[32m" // Green
-			case "idle":
-				stateColor = "\033[33m" // Yellow
-			default:
-				stateColor = "\033[31m" // Red
-			}
-			
-			// Reset color
-			resetColor := "\033[0m"
-			
-			fmt.Printf("%s%-40s %10d %10s %10d %15.2f %10d%s\n",
-				stateColor,
-				truncateString(q.Name, 39) + highlight,
-				q.Messages,
-				"-", // Ready messages (would need additional API call)
-				q.Consumers,
-				q.MessageRate,
-				q.Memory/1024,
-				resetColor,
-			)
+	for _, q := range metrics {
+		summary.TotalMessages += q.Messages
+		summary.TotalConsumers += q.Consumers
+	}
+
+	return summary, nil
+}
+
+// matchesFilter checks if queue name matches any of the filters
+func (m *QueueMonitor) matchesFilter(queueName string, filters []string) bool {
+	for _, filter := range filters {
+		if matched, _ := MatchPattern(queueName, filter); matched {
+			return true
 		}
 	}
-	
-	fmt.Println(strings.Repeat("-", 100))
-	fmt.Println("Press Ctrl+C to exit | * = >1000 msgs | + = >100 msgs")
-	
-	return nil
+	return false
 }
 
-// clearScreen clears the terminal screen
-func clearScreen() {
-	switch runtime.GOOS {
-	case "linux", "darwin":
-		cmd := exec.Command("clear")
-		cmd.Stdout = os.Stdout
-		cmd.Run()
-	case "windows":
-		cmd := exec.Command("cmd", "/c", "cls")
-		cmd.Stdout = os.Stdout
-		cmd.Run()
-	}
-}
-
-// matchPattern checks if a name matches a pattern (supports * wildcard)
-func matchPattern(name, pattern string) (bool, error) {
+// MatchPattern checks if a name matches a pattern (supports * wildcard)
+func MatchPattern(name, pattern string) (bool, error) {
 	// Simple wildcard matching
 	if !strings.Contains(pattern, "*") {
 		return name == pattern, nil
@@ -191,12 +116,4 @@ func matchPattern(name, pattern string) (bool, error) {
 	}
 	
 	return false, nil
-}
-
-// truncateString truncates a string to the specified length
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
 }

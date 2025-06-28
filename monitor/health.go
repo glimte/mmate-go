@@ -1,4 +1,4 @@
-package health
+package monitor
 
 import (
 	"context"
@@ -131,6 +131,7 @@ func (r *Registry) Check(ctx context.Context) OverallHealth {
 	}
 
 	// Collect results
+collectLoop:
 	for i := 0; i < len(checkers); i++ {
 		select {
 		case result := <-resultChan:
@@ -160,7 +161,7 @@ func (r *Registry) Check(ctx context.Context) OverallHealth {
 				}
 			}
 			overallStatus = StatusUnhealthy
-			break
+			break collectLoop
 		}
 	}
 

@@ -7,8 +7,6 @@ import (
 	"log/slog"
 	"sync"
 	"time"
-
-	"github.com/glimte/mmate-go/health"
 )
 
 // AlertLevel represents the severity of an alert
@@ -44,8 +42,8 @@ type AlertHandler interface {
 
 // BrokerHealthMonitoringService provides continuous health monitoring
 type BrokerHealthMonitoringService struct {
-	client          *RabbitMQClient
-	healthRegistry  *health.Registry
+	client          RabbitMQClient
+	healthRegistry  *Registry
 	alertHandlers   []AlertHandler
 	activeAlerts    map[string]*Alert
 	alertsMutex     sync.RWMutex
@@ -75,7 +73,7 @@ type ServiceConfig struct {
 }
 
 // NewBrokerHealthMonitoringService creates a new monitoring service
-func NewBrokerHealthMonitoringService(client *RabbitMQClient, healthRegistry *health.Registry, logger *slog.Logger) *BrokerHealthMonitoringService {
+func NewBrokerHealthMonitoringService(client RabbitMQClient, healthRegistry *Registry, logger *slog.Logger) *BrokerHealthMonitoringService {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &BrokerHealthMonitoringService{
@@ -235,11 +233,11 @@ func (s *BrokerHealthMonitoringService) performHealthChecks() {
 }
 
 // evaluateHealthCheckAlert evaluates a health check result for alerts
-func (s *BrokerHealthMonitoringService) evaluateHealthCheckAlert(checkName string, result health.CheckResult) {
+func (s *BrokerHealthMonitoringService) evaluateHealthCheckAlert(checkName string, result CheckResult) {
 	alertKey := fmt.Sprintf("health_check_%s", checkName)
 
 	switch result.Status {
-	case health.StatusUnhealthy:
+	case StatusUnhealthy:
 		s.triggerAlert(alertKey, AlertLevelCritical, "health_check", checkName,
 			fmt.Sprintf("Health check %s is unhealthy: %s", checkName, result.Message),
 			map[string]interface{}{
@@ -249,7 +247,7 @@ func (s *BrokerHealthMonitoringService) evaluateHealthCheckAlert(checkName strin
 				"details":    result.Details,
 			})
 
-	case health.StatusDegraded:
+	case StatusDegraded:
 		s.triggerAlert(alertKey, AlertLevelWarning, "health_check", checkName,
 			fmt.Sprintf("Health check %s is degraded: %s", checkName, result.Message),
 			map[string]interface{}{
@@ -258,7 +256,7 @@ func (s *BrokerHealthMonitoringService) evaluateHealthCheckAlert(checkName strin
 				"details":    result.Details,
 			})
 
-	case health.StatusHealthy:
+	case StatusHealthy:
 		s.resolveAlert(alertKey)
 	}
 }
@@ -276,12 +274,12 @@ func (s *BrokerHealthMonitoringService) checkBrokerMetrics() {
 	}
 
 	// Check message rates
-	if overview.MessageStats.PublishDetails.Rate < 0.1 && overview.MessageStats.DeliverDetails.Rate < 0.1 {
+	if overview.MessageStats.PublishDetails.Rate < 0.1 && overview.MessageStats.DeliverGetDetails.Rate < 0.1 {
 		s.triggerAlert("broker_activity", AlertLevelWarning, "broker", "activity",
 			"Broker appears inactive - very low message rates",
 			map[string]interface{}{
 				"publish_rate": overview.MessageStats.PublishDetails.Rate,
-				"deliver_rate": overview.MessageStats.DeliverDetails.Rate,
+				"deliver_rate": overview.MessageStats.DeliverGetDetails.Rate,
 			})
 	} else {
 		s.resolveAlert("broker_activity")
@@ -289,7 +287,7 @@ func (s *BrokerHealthMonitoringService) checkBrokerMetrics() {
 
 	// Check connection count
 	if threshold, exists := s.alertThresholds["connection_count"]; exists {
-		connectionCount := float64(len(overview.Connections))
+		connectionCount := float64(overview.ObjectTotals.Connections)
 		if connectionCount >= threshold.CriticalValue {
 			s.triggerAlert("connection_count", AlertLevelCritical, "broker", "connections",
 				fmt.Sprintf("Critical connection count: %.0f", connectionCount),

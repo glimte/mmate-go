@@ -90,6 +90,11 @@ func NewClientWithOptions(connectionString string, options ...ClientOption) (*Cl
 	publisherOpts := []messaging.PublisherOption{
 		messaging.WithPublisherLogger(cfg.logger),
 	}
+	
+	// Add circuit breaker if configured
+	if cfg.circuitBreaker != nil {
+		publisherOpts = append(publisherOpts, messaging.WithCircuitBreaker(cfg.circuitBreaker))
+	}
 	if cfg.publishPipeline != nil {
 		publisherOpts = append(publisherOpts, messaging.WithPublisherInterceptors(cfg.publishPipeline))
 	} else if sharedMetricsCollector != nil {
@@ -356,6 +361,7 @@ type clientConfig struct {
 	enableDefaultRetry bool
 	metricsCollector   interceptors.MetricsCollector
 	enableDefaultMetrics bool
+	circuitBreaker     *reliability.CircuitBreaker
 }
 
 // ClientOption configures the client
@@ -450,5 +456,12 @@ func WithMetrics(collector interceptors.MetricsCollector) ClientOption {
 func WithDefaultMetrics() ClientOption {
 	return func(cfg *clientConfig) {
 		cfg.enableDefaultMetrics = true
+	}
+}
+
+// WithCircuitBreaker sets the circuit breaker for message publishing
+func WithCircuitBreaker(cb *reliability.CircuitBreaker) ClientOption {
+	return func(cfg *clientConfig) {
+		cfg.circuitBreaker = cb
 	}
 }

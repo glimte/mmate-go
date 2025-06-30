@@ -387,6 +387,33 @@ func (c *Client) DiscoverEndpoints(ctx context.Context, pattern string, version 
 	return c.contractDiscovery.DiscoverEndpoints(ctx, pattern, version)
 }
 
+// PublishEvent publishes an event message
+// This is a convenience method that delegates to the publisher
+func (c *Client) PublishEvent(ctx context.Context, evt contracts.Event, options ...messaging.PublishOption) error {
+	if c.publisher == nil {
+		return fmt.Errorf("publisher not initialized")
+	}
+	return c.publisher.PublishEvent(ctx, evt, options...)
+}
+
+// PublishCommand publishes a command message
+// This is a convenience method that delegates to the publisher
+func (c *Client) PublishCommand(ctx context.Context, cmd contracts.Command, options ...messaging.PublishOption) error {
+	if c.publisher == nil {
+		return fmt.Errorf("publisher not initialized")
+	}
+	return c.publisher.PublishCommand(ctx, cmd, options...)
+}
+
+// PublishReply publishes a reply message
+// This is a convenience method that delegates to the publisher
+func (c *Client) PublishReply(ctx context.Context, reply contracts.Reply, replyTo string, options ...messaging.PublishOption) error {
+	if c.publisher == nil {
+		return fmt.Errorf("publisher not initialized")
+	}
+	return c.publisher.PublishReply(ctx, reply, replyTo, options...)
+}
+
 // Close closes all resources
 func (c *Client) Close() error {
 	if c.contractDiscovery != nil {

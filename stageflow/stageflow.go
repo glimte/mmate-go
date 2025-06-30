@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/glimte/mmate-go/contracts"
 	"github.com/glimte/mmate-go/internal/reliability"
 	"github.com/glimte/mmate-go/messaging"
 	"github.com/google/uuid"
@@ -139,12 +140,13 @@ type Workflow struct {
 
 // StageFlowEngine manages workflow execution
 type StageFlowEngine struct {
-	publisher  messaging.Publisher
-	subscriber messaging.Subscriber
-	stateStore StateStore
-	workflows  map[string]*Workflow
-	mu         sync.RWMutex
-	logger     *slog.Logger
+	publisher    messaging.Publisher
+	subscriber   messaging.Subscriber
+	stateStore   StateStore
+	workflows    map[string]*Workflow
+	serviceQueue string
+	mu           sync.RWMutex
+	logger       *slog.Logger
 }
 
 // EngineOption configures the stage flow engine
@@ -173,7 +175,7 @@ func WithStageFlowLogger(logger *slog.Logger) EngineOption {
 // NewStageFlowEngine creates a new stage flow engine
 func NewStageFlowEngine(publisher messaging.Publisher, subscriber messaging.Subscriber, opts ...EngineOption) *StageFlowEngine {
 	config := &EngineConfig{
-		StateStore: NewInMemoryStateStore(),
+		StateStore: NewQueueBasedStateStore(), // Use queue-based state store
 		Logger:     slog.Default(),
 	}
 
@@ -181,13 +183,61 @@ func NewStageFlowEngine(publisher messaging.Publisher, subscriber messaging.Subs
 		opt(config)
 	}
 
-	return &StageFlowEngine{
+	engine := &StageFlowEngine{
 		publisher:  publisher,
 		subscriber: subscriber,
 		stateStore: config.StateStore,
 		workflows:  make(map[string]*Workflow),
 		logger:     config.Logger,
 	}
+
+	// Register message type for flow envelopes
+	messaging.Register("FlowMessageEnvelope", func() contracts.Message { return &FlowMessageEnvelope{} })
+
+	return engine
+}
+
+// proceedToNextStage determines next action after stage completion
+func (w *Workflow) proceedToNextStage(ctx context.Context, envelope *FlowMessageEnvelope, state *WorkflowState) error {
+	nextStageIndex := envelope.CurrentStageIndex + 1
+	
+	// Check if workflow is complete
+	if nextStageIndex >= len(w.Stages) {
+		// Workflow completed
+		state.Status = WorkflowCompleted
+		endTime := time.Now()
+		state.EndTime = &endTime
+		state.LastModified = time.Now()
+		state.Version++
+		
+		w.engine.logger.Info("workflow execution completed",
+			"workflowId", envelope.WorkflowID,
+			"instanceId", envelope.InstanceID,
+			"duration", endTime.Sub(state.StartTime))
+		
+		// TODO: Publish completion event if needed
+		return nil
+	}
+	
+	// Publish to next stage with updated state
+	return w.publishToStage(ctx, nextStageIndex, state, envelope.Payload)
+}
+
+// ProcessStageMessage processes a stage message - exposed for external dispatcher integration
+func (w *Workflow) ProcessStageMessage(ctx context.Context, envelope *FlowMessageEnvelope) error {
+	// Verify this message is for this workflow
+	if envelope.WorkflowID != w.ID {
+		return fmt.Errorf("message workflow ID %s does not match %s", envelope.WorkflowID, w.ID)
+	}
+	
+	w.engine.logger.Info("processing stage message",
+		"workflowId", envelope.WorkflowID,
+		"instanceId", envelope.InstanceID,
+		"stageIndex", envelope.CurrentStageIndex,
+		"stageName", envelope.StageName)
+	
+	// Process the stage
+	return w.processStageMessage(ctx, envelope)
 }
 
 // RegisterWorkflow registers a workflow with the engine
@@ -202,11 +252,10 @@ func (e *StageFlowEngine) RegisterWorkflow(workflow *Workflow) error {
 	workflow.engine = e
 
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	e.workflows[workflow.ID] = workflow
-	e.logger.Info("registered workflow", "workflowId", workflow.ID, "name", workflow.Name)
+	e.mu.Unlock()
 
+	e.logger.Info("registered workflow", "workflowId", workflow.ID, "name", workflow.Name, "stages", len(workflow.Stages))
 	return nil
 }
 
@@ -221,6 +270,12 @@ func (e *StageFlowEngine) GetWorkflow(workflowID string) (*Workflow, error) {
 	}
 
 	return workflow, nil
+}
+
+// SetServiceQueue sets the service queue name for workflow message routing
+func (e *StageFlowEngine) SetServiceQueue(queueName string) {
+	e.serviceQueue = queueName
+	e.logger.Info("service queue set for stageflow", "queue", queueName)
 }
 
 // ExecuteWorkflow starts execution of a workflow
@@ -327,10 +382,14 @@ func WithRequired(required bool) StageOption {
 	}
 }
 
-// Execute starts the workflow execution
+// Execute starts the workflow execution by publishing to first stage queue
 func (w *Workflow) Execute(ctx context.Context, initialData map[string]interface{}) (*WorkflowState, error) {
 	if w.engine == nil {
 		return nil, fmt.Errorf("workflow not registered with engine")
+	}
+
+	if len(w.Stages) == 0 {
+		return nil, fmt.Errorf("workflow has no stages")
 	}
 
 	// Create workflow instance
@@ -350,188 +409,204 @@ func (w *Workflow) Execute(ctx context.Context, initialData map[string]interface
 		state.GlobalData = make(map[string]interface{})
 	}
 
-	// Save initial state
-	err := w.engine.stateStore.SaveState(ctx, state)
-	if err != nil {
-		return nil, fmt.Errorf("failed to save initial state: %w", err)
-	}
-
 	w.engine.logger.Info("starting workflow execution",
 		"workflowId", w.ID,
 		"instanceId", instanceID,
 		"stageCount", len(w.Stages))
 
-	// Execute stages
-	err = w.executeStages(ctx, state)
+	// Publish to first stage queue with state embedded
+	err := w.publishToStage(ctx, 0, state, initialData)
 	if err != nil {
-		state.Status = WorkflowFailed
-		state.ErrorMessage = err.Error()
-		endTime := time.Now()
-		state.EndTime = &endTime
-		state.LastModified = time.Now()
-		state.Version++
-
-		// Save failed state
-		w.engine.stateStore.SaveState(ctx, state)
-
-		w.engine.logger.Error("workflow execution failed",
-			"workflowId", w.ID,
-			"instanceId", instanceID,
-			"error", err.Error())
-
-		return state, err
+		return nil, fmt.Errorf("failed to start workflow: %w", err)
 	}
-
-	// Mark as completed
-	state.Status = WorkflowCompleted
-	endTime := time.Now()
-	state.EndTime = &endTime
-	state.LastModified = time.Now()
-	state.Version++
-
-	err = w.engine.stateStore.SaveState(ctx, state)
-	if err != nil {
-		w.engine.logger.Warn("failed to save final state", "error", err.Error())
-	}
-
-	w.engine.logger.Info("workflow execution completed",
-		"workflowId", w.ID,
-		"instanceId", instanceID,
-		"duration", endTime.Sub(state.StartTime))
 
 	return state, nil
 }
 
-// executeStages executes all stages in the workflow
-func (w *Workflow) executeStages(ctx context.Context, state *WorkflowState) error {
-	for _, stage := range w.Stages {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		// Check dependencies
-		if !w.dependenciesSatisfied(stage, state) {
-			if stage.Required {
-				return fmt.Errorf("dependencies not satisfied for required stage: %s", stage.ID)
-			}
-			// Skip optional stage
-			w.addStageResult(state, &StageResult{
-				StageID:   stage.ID,
-				Status:    StageSkipped,
-				StartTime: time.Now(),
-				Duration:  0,
-			})
-			continue
-		}
-
-		// Execute stage
-		state.CurrentStage = stage.ID
-		state.LastModified = time.Now()
-
-		result, err := w.executeStage(ctx, stage, state)
-		if err != nil {
-			if stage.Required {
-				// Start compensation
-				w.compensateStages(ctx, state)
-				return fmt.Errorf("required stage %s failed: %w", stage.ID, err)
-			}
-			// Mark as failed but continue
-			result = &StageResult{
-				StageID:   stage.ID,
-				Status:    StageFailed,
-				Error:     err.Error(),
-				StartTime: time.Now(),
-				Duration:  0,
-			}
-		}
-
-		w.addStageResult(state, result)
-
-		// Save state after each stage
-		err = w.engine.stateStore.SaveState(ctx, state)
-		if err != nil {
-			w.engine.logger.Warn("failed to save state after stage", "stageId", stage.ID, "error", err.Error())
-		}
+// publishToStage publishes a message to the service queue with state embedded
+func (w *Workflow) publishToStage(ctx context.Context, stageIndex int, state *WorkflowState, payload interface{}) error {
+	if stageIndex >= len(w.Stages) {
+		return fmt.Errorf("stage index %d out of bounds", stageIndex)
 	}
 
-	state.CurrentStage = ""
-	return nil
+	stage := w.Stages[stageIndex]
+
+	// Serialize workflow state
+	stateData, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("failed to serialize workflow state: %w", err)
+	}
+
+	// Serialize payload
+	payloadData, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to serialize payload: %w", err)
+	}
+
+	// Create flow message envelope with state embedded
+	envelope := &FlowMessageEnvelope{}
+	envelope.Type = "FlowMessageEnvelope"
+	envelope.ID = uuid.New().String()
+	envelope.Timestamp = time.Now()
+	envelope.Payload = payloadData
+	envelope.PayloadType = fmt.Sprintf("%T", payload)
+	envelope.SerializedWorkflowState = string(stateData)
+	envelope.WorkflowStateType = "WorkflowState"
+	envelope.CurrentStageIndex = stageIndex
+	envelope.WorkflowID = w.ID
+	envelope.InstanceID = state.InstanceID
+	envelope.StageName = stage.ID
+
+	// Set next stage info if not last stage
+	if stageIndex+1 < len(w.Stages) {
+		nextStage := w.Stages[stageIndex+1]
+		envelope.NextStageQueue = nextStage.ID // Just the stage name
+	}
+
+	w.engine.logger.Info("publishing stage message to service queue",
+		"workflowId", w.ID,
+		"instanceId", state.InstanceID,
+		"stageId", stage.ID,
+		"stageIndex", stageIndex,
+		"serviceQueue", w.engine.serviceQueue)
+
+	// Publish to service queue (same queue where commands are received)
+	return w.engine.publisher.Publish(ctx, envelope,
+		messaging.WithExchange(""), // Direct queue delivery
+		messaging.WithRoutingKey(w.engine.serviceQueue),
+		messaging.WithPersistent(true), // Ensure message persistence
+	)
 }
 
-// executeStage executes a single stage
-func (w *Workflow) executeStage(ctx context.Context, stage *Stage, state *WorkflowState) (*StageResult, error) {
-	w.engine.logger.Info("executing stage", "stageId", stage.ID, "workflowId", state.WorkflowID, "instanceId", state.InstanceID)
+// processStageMessage processes a single stage from a queue message
+func (w *Workflow) processStageMessage(ctx context.Context, envelope *FlowMessageEnvelope) error {
+	// Deserialize workflow state from envelope
+	var state WorkflowState
+	err := json.Unmarshal([]byte(envelope.SerializedWorkflowState), &state)
+	if err != nil {
+		return fmt.Errorf("failed to deserialize workflow state: %w", err)
+	}
+
+	// Find the stage to execute
+	if envelope.CurrentStageIndex >= len(w.Stages) {
+		return fmt.Errorf("stage index %d out of bounds", envelope.CurrentStageIndex)
+	}
+
+	stage := w.Stages[envelope.CurrentStageIndex]
+	if stage.ID != envelope.StageName {
+		return fmt.Errorf("stage ID mismatch: expected %s, got %s", stage.ID, envelope.StageName)
+	}
+
+	w.engine.logger.Info("processing stage from queue",
+		"workflowId", envelope.WorkflowID,
+		"instanceId", envelope.InstanceID,
+		"stageId", stage.ID,
+		"stageIndex", envelope.CurrentStageIndex)
 
 	startTime := time.Now()
+	state.CurrentStage = stage.ID
+	state.LastModified = time.Now()
 
+	// Check dependencies
+	if !w.dependenciesSatisfied(stage, &state) {
+		if stage.Required {
+			return fmt.Errorf("dependencies not satisfied for required stage: %s", stage.ID)
+		}
+		// Skip optional stage
+		result := &StageResult{
+			StageID:   stage.ID,
+			Status:    StageSkipped,
+			StartTime: startTime,
+			Duration:  0,
+		}
+		w.addStageResult(&state, result)
+		return w.proceedToNextStage(ctx, envelope, &state)
+	}
+
+	// Execute stage with timeout and retry
 	var result *StageResult
-	var err error
-
-	// Execute with retry if policy is configured
 	executeFunc := func() error {
-		// Create a new timeout context for each retry attempt
 		stageCtx, cancel := context.WithTimeout(ctx, stage.Timeout)
 		defer cancel()
 		
 		var execErr error
-		result, execErr = stage.Handler.Execute(stageCtx, state)
+		result, execErr = stage.Handler.Execute(stageCtx, &state)
 		return execErr
 	}
 
+	var execErr error
 	if stage.RetryPolicy != nil {
-		err = reliability.Retry(ctx, stage.RetryPolicy, executeFunc)
+		execErr = reliability.Retry(ctx, stage.RetryPolicy, executeFunc)
 	} else {
-		err = executeFunc()
+		execErr = executeFunc()
 	}
 
 	duration := time.Since(startTime)
 
-	if err != nil {
+	if execErr != nil {
 		w.engine.logger.Error("stage execution failed",
 			"stageId", stage.ID,
-			"workflowId", state.WorkflowID,
-			"instanceId", state.InstanceID,
+			"workflowId", envelope.WorkflowID,
+			"instanceId", envelope.InstanceID,
 			"duration", duration,
-			"error", err.Error())
+			"error", execErr.Error())
 
-		return &StageResult{
+		if stage.Required {
+			// Mark workflow as failed and start compensation
+			state.Status = WorkflowFailed
+			state.ErrorMessage = execErr.Error()
+			endTime := time.Now()
+			state.EndTime = &endTime
+			state.LastModified = time.Now()
+			state.Version++
+
+			// TODO: Implement compensation via queue messages
+			return fmt.Errorf("required stage %s failed: %w", stage.ID, execErr)
+		}
+
+		// Mark as failed but continue
+		result = &StageResult{
 			StageID:   stage.ID,
 			Status:    StageFailed,
-			Error:     err.Error(),
+			Error:     execErr.Error(),
 			StartTime: startTime,
 			Duration:  duration,
-		}, err
-	}
-
-	if result == nil {
-		result = &StageResult{
-			StageID:  stage.ID,
-			Status:   StageCompleted,
-			Data:     make(map[string]interface{}),
-			Duration: duration,
 		}
+	} else {
+		// Ensure result is properly populated
+		if result == nil {
+			result = &StageResult{
+				StageID:  stage.ID,
+				Status:   StageCompleted,
+				Data:     make(map[string]interface{}),
+				Duration: duration,
+			}
+		}
+
+		result.StageID = stage.ID
+		result.StartTime = startTime
+		result.Duration = duration
+		endTime := startTime.Add(duration)
+		result.EndTime = &endTime
+
+		if result.Status == "" {
+			result.Status = StageCompleted
+		}
+
+		w.engine.logger.Info("stage execution completed",
+			"stageId", stage.ID,
+			"workflowId", envelope.WorkflowID,
+			"instanceId", envelope.InstanceID,
+			"duration", duration,
+			"status", result.Status)
 	}
 
-	result.StageID = stage.ID
-	result.StartTime = startTime
-	result.Duration = duration
-	endTime := startTime.Add(duration)
-	result.EndTime = &endTime
+	// Add result to state
+	w.addStageResult(&state, result)
+	state.CurrentStage = ""
 
-	if result.Status == "" {
-		result.Status = StageCompleted
-	}
-
-	w.engine.logger.Info("stage execution completed",
-		"stageId", stage.ID,
-		"workflowId", state.WorkflowID,
-		"instanceId", state.InstanceID,
-		"duration", duration,
-		"status", result.Status)
-
-	return result, nil
+	// Proceed to next stage or complete workflow
+	return w.proceedToNextStage(ctx, envelope, &state)
 }
 
 // dependenciesSatisfied checks if all dependencies for a stage are satisfied

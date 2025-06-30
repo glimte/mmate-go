@@ -47,14 +47,15 @@ client := mmate.NewClient("amqp://localhost",
 
 ## 🔥 **Key Features**
 
-| Feature | Mmate-Go | NATS | Watermill | Raw RabbitMQ |
-|---------|----------|------|-----------|--------------|
-| **Zero Config Reliability** | ✅ | ❌ | ❌ | ❌ |
-| **Built-in DLQ** | ✅ | ❌ | ❌ | ❌ |
-| **Circuit Breaker** | ✅ | ❌ | ❌ | ❌ |
-| **Service Monitoring** | ✅ | ❌ | ❌ | ❌ |
-| **Workflow Orchestration** | ✅ | ❌ | ❌ | ❌ |
-| **Multi-Transport** | 🔜 | ❌ | ✅ | ❌ |
+| Feature | Mmate-Go | 
+|---------|----------|
+| **Zero Config Reliability** | ✅ | 
+| **Built-in DLQ** | ✅ | 
+| **Circuit Breaker** | ✅ | 
+| **Service Monitoring** | ✅ | 
+| **Workflow Orchestration** | ✅ | 
+| **Contract Discovery** | ✅ |
+
 
 ### 🎛️ **Enterprise Features Out-of-the-Box**
 
@@ -156,6 +157,7 @@ response, err := bridge.SendAndWait(ctx,
     30*time.Second,
 )
 ```
+
 
 ## 🏗️ **Architecture**
 

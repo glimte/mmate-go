@@ -31,6 +31,9 @@ type TypeRegistry interface {
 
 	// ListTypes returns all registered type names
 	ListTypes() []string
+
+	// GetFactory returns a factory function for the given type name
+	GetFactory(typeName string) (func() contracts.Message, error)
 }
 
 // DefaultTypeRegistry is the default implementation of TypeRegistry
@@ -354,4 +357,26 @@ func (s *JSONSerializer) DeserializeEnvelope(data []byte) (*contracts.Envelope, 
 	}
 
 	return &env, nil
+}
+
+// GetFactory returns a factory function for the given type name
+func (r *DefaultTypeRegistry) GetFactory(typeName string) (func() contracts.Message, error) {
+	t, err := r.Get(typeName)
+	if err != nil {
+		return nil, err
+	}
+
+	return func() contracts.Message {
+		instance := reflect.New(t).Interface()
+		msg, _ := instance.(contracts.Message)
+		return msg
+	}, nil
+}
+
+// Global registry instance
+var globalRegistry = NewTypeRegistry()
+
+// GetGlobalRegistry returns the global type registry
+func GetGlobalRegistry() TypeRegistry {
+	return globalRegistry
 }

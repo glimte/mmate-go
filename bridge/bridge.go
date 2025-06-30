@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -146,8 +147,12 @@ func NewSyncAsyncBridge(publisher Publisher, subscriber Subscriber, logger inter
 	}
 
 	// Subscribe to reply queue
+	// The subscriber will handle queue creation through standard mmate mechanisms
 	ctx := context.Background()
-	err := subscriber.Subscribe(ctx, config.ReplyQueue, "reply", messaging.MessageHandlerFunc(bridge.handleReply))
+	err := subscriber.Subscribe(ctx, config.ReplyQueue, "*", messaging.MessageHandlerFunc(bridge.handleReply),
+		messaging.WithAutoDelete(true),
+		messaging.WithSubscriberExclusive(true),
+		messaging.WithSubscriberDurable(false)) // Temporary queues should not be durable
 	if err != nil {
 		return nil, fmt.Errorf("failed to subscribe to reply queue: %w", err)
 	}
@@ -190,14 +195,24 @@ func (b *SyncAsyncBridge) RequestCommand(ctx context.Context, cmd contracts.Comm
 	}
 
 	// Set reply queue in command
-	if baseCmd, ok := cmd.(*contracts.BaseCommand); ok {
-		baseCmd.ReplyTo = b.replyQueue
+	// Use reflection to set ReplyTo field since commands embed BaseCommand
+	cmdValue := reflect.ValueOf(cmd)
+	if cmdValue.Kind() == reflect.Ptr {
+		cmdValue = cmdValue.Elem()
+	}
+	if cmdValue.Kind() == reflect.Struct {
+		if replyToField := cmdValue.FieldByName("ReplyTo"); replyToField.IsValid() && replyToField.CanSet() {
+			replyToField.SetString(b.replyQueue)
+		}
 	}
 
 	correlationID := uuid.New().String()
 	if msg, ok := cmd.(contracts.Message); ok {
 		msg.SetCorrelationID(correlationID)
 	}
+
+	// Log correlation ID for debugging
+	fmt.Printf("[Bridge] Sending command with correlationID: %s, replyQueue: %s\n", correlationID, b.replyQueue)
 
 	return b.sendRequest(ctx, func(ctx context.Context) error {
 		return b.publisher.PublishCommand(ctx, cmd)
@@ -211,8 +226,15 @@ func (b *SyncAsyncBridge) RequestQuery(ctx context.Context, query contracts.Quer
 	}
 
 	// Set reply queue in query
-	if baseQuery, ok := query.(*contracts.BaseQuery); ok {
-		baseQuery.ReplyTo = b.replyQueue
+	// Use reflection to set ReplyTo field since queries embed BaseQuery
+	queryValue := reflect.ValueOf(query)
+	if queryValue.Kind() == reflect.Ptr {
+		queryValue = queryValue.Elem()
+	}
+	if queryValue.Kind() == reflect.Struct {
+		if replyToField := queryValue.FieldByName("ReplyTo"); replyToField.IsValid() && replyToField.CanSet() {
+			replyToField.SetString(b.replyQueue)
+		}
 	}
 
 	correlationID := uuid.New().String()
@@ -295,8 +317,11 @@ func (b *SyncAsyncBridge) executeWithRetry(ctx context.Context, publishFunc func
 
 // handleReply processes incoming reply messages
 func (b *SyncAsyncBridge) handleReply(ctx context.Context, msg contracts.Message) error {
+	fmt.Printf("[Bridge] handleReply called with message type: %T\n", msg)
+	
 	reply, ok := msg.(contracts.Reply)
 	if !ok {
+		fmt.Printf("[Bridge] ERROR: received non-reply message: %T\n", msg)
 		return fmt.Errorf("received non-reply message: %T", msg)
 	}
 
@@ -305,18 +330,23 @@ func (b *SyncAsyncBridge) handleReply(ctx context.Context, msg contracts.Message
 		return fmt.Errorf("reply missing correlation ID")
 	}
 
+	// Log correlation ID for debugging
+	fmt.Printf("[Bridge] Received reply with correlationID: %s\n", correlationID)
+
 	b.mu.RLock()
 	pending, exists := b.pendingRequests[correlationID]
 	b.mu.RUnlock()
 
 	if !exists {
 		// Request may have timed out or been cleaned up
+		fmt.Printf("[Bridge] No pending request found for correlationID: %s\n", correlationID)
 		return nil
 	}
 
 	// Send reply to waiting goroutine
 	select {
 	case pending.ResponseCh <- reply:
+		fmt.Printf("[Bridge] Successfully delivered reply for correlationID: %s\n", correlationID)
 		return nil
 	case <-pending.Context.Done():
 		return nil // Request was cancelled

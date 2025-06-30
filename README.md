@@ -95,67 +95,38 @@ func main() {
     )
     defer client.Close()
 
-    // Handle events with automatic DLQ on failure
-    client.Subscribe("UserCreated", func(ctx context.Context, event UserCreated) error {
-        // Your business logic here
-        return processUser(event)
-    })
+    // Register message types
+    messaging.Register("UserCreated", func() contracts.Message { return &UserCreated{} })
+
+    // Get components
+    dispatcher := client.Dispatcher()
+    subscriber := client.Subscriber()
+
+    // Register handler for specific message type
+    dispatcher.RegisterHandler(&UserCreated{}, messaging.MessageHandlerFunc(
+        func(ctx context.Context, msg contracts.Message) error {
+            event := msg.(*UserCreated)
+            // Your business logic here
+            return processUser(event)
+        }))
+
+    // Subscribe to service queue (handles all registered message types)
+    subscriber.Subscribe(ctx, client.ServiceQueue(), "*", dispatcher,
+        messaging.WithAutoAck(false)) // Manual ack for reliability
 
     // Publish events with automatic routing
     client.PublishEvent(ctx, UserCreated{
+        BaseEvent: contracts.BaseEvent{
+            BaseMessage: contracts.BaseMessage{
+                Type:      "UserCreated",
+                ID:        uuid.New().String(),
+                Timestamp: time.Now(),
+            },
+        },
         UserID: "12345",
         Email:  "user@example.com",
     })
 }
-```
-
-## 💡 Examples
-
-### 🛒 **E-commerce Order Processing**
-
-```go
-// Order service publishes events
-client.PublishEvent(ctx, OrderCreated{
-    OrderID:    "ORD-001",
-    CustomerID: "CUST-123", 
-    Amount:     99.99,
-})
-
-// Inventory service handles events automatically
-client.Subscribe("OrderCreated", func(ctx context.Context, event OrderCreated) error {
-    return reserveInventory(event.OrderID)
-    // ✅ Auto-retry on failure
-    // ✅ DLQ after max retries
-    // ✅ Metrics automatically collected
-})
-```
-
-### 🔄 **Multi-Stage Workflows** 
-
-```go
-// Define complex business workflows
-workflow := stageflow.NewPipeline().
-    AddStage("validate-order", validateOrder).
-    AddStage("process-payment", processPayment). 
-    AddStage("fulfill-order", fulfillOrder).
-    OnError(compensateOrder) // ✅ Automatic rollback
-
-// Execute with state persistence
-workflow.Execute(ctx, OrderWorkflow{OrderID: "ORD-001"})
-```
-
-### 📊 **Request-Response Patterns**
-
-```go
-// Synchronous-style API over async transport
-bridge := client.Bridge()
-
-// Make request and wait for response (with timeout)
-response, err := bridge.SendAndWait(ctx, 
-    GetUserQuery{UserID: "123"}, 
-    "user.get", 
-    30*time.Second,
-)
 ```
 
 
@@ -226,23 +197,6 @@ client := mmate.NewClientWithInterceptors(conn, pipeline)
 
 *Performance with enterprise features enabled. Raw performance vs. developer productivity trade-off.*
 
-## 🤝 **Comparison**
-
-### **vs. NATS**
-- ✅ **Mmate-Go**: Enterprise features built-in, workflow orchestration
-- ❌ **NATS**: Minimal features, requires building reliability yourself
-
-### **vs. Kafka** 
-- ✅ **Mmate-Go**: Simple setup, no ZooKeeper, perfect for most use cases
-- ❌ **Kafka**: Complex operations, overkill for <1M messages/day
-
-### **vs. Watermill**
-- ✅ **Mmate-Go**: Enterprise patterns, monitoring, workflows included  
-- ❌ **Watermill**: Basic transport abstraction, build everything else yourself
-
-### **vs. Raw RabbitMQ**
-- ✅ **Mmate-Go**: High-level patterns, automatic reliability, monitoring
-- ❌ **Raw RabbitMQ**: Low-level API, manual error handling, no workflows
 
 ## 📚 **Documentation**
 
@@ -262,7 +216,7 @@ client := mmate.NewClientWithInterceptors(conn, pipeline)
 - Service-scoped monitoring
 
 ### 🔜 **Coming Soon (v1.1)**
-- **Multi-Transport Support** (NATS, Kafka, In-Memory)
+- **Multi-Transport Support** (Kafka, In-Memory, Etc.)
 - **Prometheus Exporter** built-in
 - **gRPC Integration** for hybrid architectures
 - **Cloud Provider Integrations** (AWS SQS, GCP Pub/Sub)
@@ -294,7 +248,7 @@ Licensed under the [Apache License 2.0](LICENSE). Feel free to use in commercial
 
 **Made with ❤️ for the Go community**
 
-[⭐ **Star**](https://github.com/glimte/mmate-go/stargazers) • [🐛 **Issues**](https://github.com/glimte/mmate-go/issues) • [💬 **Discussions**](https://github.com/glimte/mmate-go/discussions) • [📧 **Contact**](mailto:team@mmate.dev)
+[⭐ **Star**](https://github.com/glimte/mmate-go/stargazers) • [🐛 **Issues**](https://github.com/glimte/mmate-go/issues) • [💬 **Discussions**](https://github.com/glimte/mmate-go/discussions) 
 
 *Don't let messaging complexity slow down your team. Choose Mmate-Go.*
 

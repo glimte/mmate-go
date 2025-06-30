@@ -729,8 +729,8 @@ func TestComplexPipelineScenarios(t *testing.T) {
 		assert.Equal(t, WorkflowCompleted, state.Status)
 		
 		// Verify aggregation results
-		assert.Equal(t, float64(21), state.GlobalData["aggregate.sum"])  // 1+2+3+4+5+6
-		assert.Equal(t, float64(6), state.GlobalData["aggregate.count"])
+		assert.Equal(t, 21, state.GlobalData["aggregate.sum"])  // 1+2+3+4+5+6
+		assert.Equal(t, 6, state.GlobalData["aggregate.count"])
 	})
 }
 

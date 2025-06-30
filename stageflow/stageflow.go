@@ -466,22 +466,22 @@ func (w *Workflow) executeStage(ctx context.Context, stage *Stage, state *Workfl
 
 	startTime := time.Now()
 
-	// Create stage context with timeout
-	stageCtx, cancel := context.WithTimeout(ctx, stage.Timeout)
-	defer cancel()
-
 	var result *StageResult
 	var err error
 
 	// Execute with retry if policy is configured
 	executeFunc := func() error {
+		// Create a new timeout context for each retry attempt
+		stageCtx, cancel := context.WithTimeout(ctx, stage.Timeout)
+		defer cancel()
+		
 		var execErr error
 		result, execErr = stage.Handler.Execute(stageCtx, state)
 		return execErr
 	}
 
 	if stage.RetryPolicy != nil {
-		err = reliability.Retry(stageCtx, stage.RetryPolicy, executeFunc)
+		err = reliability.Retry(ctx, stage.RetryPolicy, executeFunc)
 	} else {
 		err = executeFunc()
 	}

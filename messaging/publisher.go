@@ -105,6 +105,14 @@ func WithRoutingKey(routingKey string) PublishOption {
 	}
 }
 
+// WithDirectQueue publishes directly to a queue (for point-to-point messaging)
+func WithDirectQueue(queue string) PublishOption {
+	return func(opts *PublishOptions) {
+		opts.Exchange = ""
+		opts.RoutingKey = queue
+	}
+}
+
 // WithTTL sets the message TTL
 func WithTTL(ttl time.Duration) PublishOption {
 	return func(opts *PublishOptions) {
@@ -139,6 +147,16 @@ func WithHeaders(headers map[string]interface{}) PublishOption {
 		for k, v := range headers {
 			opts.Headers[k] = v
 		}
+	}
+}
+
+// WithPublishReplyTo sets the reply-to queue for publishing
+func WithPublishReplyTo(replyTo string) PublishOption {
+	return func(opts *PublishOptions) {
+		if opts.Headers == nil {
+			opts.Headers = make(map[string]interface{})
+		}
+		opts.Headers["replyTo"] = replyTo
 	}
 }
 

@@ -21,25 +21,28 @@ import (
 	"time"
 
 	"github.com/glimte/mmate-go/bridge"
+	"github.com/glimte/mmate-go/contracts"
 	"github.com/glimte/mmate-go/messaging"
 	rabbitmqTransport "github.com/glimte/mmate-go/transports/rabbitmq"
 	"github.com/glimte/mmate-go/internal/rabbitmq"
 	"github.com/glimte/mmate-go/interceptors"
 	"github.com/glimte/mmate-go/internal/reliability"
 	"github.com/glimte/mmate-go/monitor"
+	"github.com/glimte/mmate-go/schema"
 )
 
 // Client provides the main entry point for mmate-go
 type Client struct {
-	transport        messaging.Transport
-	publisher        *messaging.MessagePublisher
-	subscriber       *messaging.MessageSubscriber
-	dispatcher       *messaging.MessageDispatcher
-	bridge           *bridge.SyncAsyncBridge
-	serviceName      string
-	receiveQueue     string
-	metricsCollector interceptors.MetricsCollector
-	connectionString string // Store for monitoring access
+	transport         messaging.Transport
+	publisher         *messaging.MessagePublisher
+	subscriber        *messaging.MessageSubscriber
+	dispatcher        *messaging.MessageDispatcher
+	bridge            *bridge.SyncAsyncBridge
+	contractDiscovery *messaging.ContractDiscovery
+	serviceName       string
+	receiveQueue      string
+	metricsCollector  interceptors.MetricsCollector
+	connectionString  string // Store for monitoring access
 }
 
 // NewClient creates a new mmate client with default RabbitMQ transport
@@ -177,15 +180,39 @@ func NewClientWithOptions(connectionString string, options ...ClientOption) (*Cl
 		cfg.logger.Info("Service queue created", "queue", queueName)
 	}
 
+	// Create contract discovery if enabled
+	var contractDiscovery *messaging.ContractDiscovery
+	if cfg.enableContractDiscovery {
+		// Create validator
+		validator := schema.NewMessageValidator()
+		contractValidator := schema.NewContractValidator(validator)
+		
+		// Create contract discovery
+		contractDiscovery = messaging.NewContractDiscovery(
+			subscriber,
+			publisher,
+			messaging.WithServiceName(cfg.serviceName),
+			messaging.WithContractValidator(contractValidator),
+		)
+		
+		// Start contract discovery
+		if err := contractDiscovery.Start(context.Background()); err != nil {
+			return nil, fmt.Errorf("failed to start contract discovery: %w", err)
+		}
+		
+		cfg.logger.Info("Contract discovery enabled", "service", cfg.serviceName)
+	}
+
 	return &Client{
-		transport:        transport,
-		publisher:        publisher,
-		subscriber:       subscriber,
-		dispatcher:       dispatcher,
-		serviceName:      cfg.serviceName,
-		receiveQueue:     queueName,
-		metricsCollector: sharedMetricsCollector,
-		connectionString: connectionString,
+		transport:         transport,
+		publisher:         publisher,
+		subscriber:        subscriber,
+		dispatcher:        dispatcher,
+		contractDiscovery: contractDiscovery,
+		serviceName:       cfg.serviceName,
+		receiveQueue:      queueName,
+		metricsCollector:  sharedMetricsCollector,
+		connectionString:  connectionString,
 	}, nil
 }
 
@@ -331,8 +358,40 @@ func (c *Client) getChannelPoolFromTransport(transport *rabbitmqTransport.Transp
 	return channelPool, nil
 }
 
+// ContractDiscovery returns the contract discovery service if enabled
+func (c *Client) ContractDiscovery() *messaging.ContractDiscovery {
+	return c.contractDiscovery
+}
+
+// RegisterEndpoint registers a service endpoint for discovery
+func (c *Client) RegisterEndpoint(ctx context.Context, contract *contracts.EndpointContract) error {
+	if c.contractDiscovery == nil {
+		return fmt.Errorf("contract discovery not enabled")
+	}
+	return c.contractDiscovery.RegisterEndpoint(ctx, contract)
+}
+
+// DiscoverEndpoint discovers a specific endpoint by ID
+func (c *Client) DiscoverEndpoint(ctx context.Context, endpointID string) (*contracts.EndpointContract, error) {
+	if c.contractDiscovery == nil {
+		return nil, fmt.Errorf("contract discovery not enabled")
+	}
+	return c.contractDiscovery.DiscoverEndpoint(ctx, endpointID)
+}
+
+// DiscoverEndpoints discovers endpoints matching a pattern
+func (c *Client) DiscoverEndpoints(ctx context.Context, pattern string, version string) ([]contracts.EndpointContract, error) {
+	if c.contractDiscovery == nil {
+		return nil, fmt.Errorf("contract discovery not enabled")
+	}
+	return c.contractDiscovery.DiscoverEndpoints(ctx, pattern, version)
+}
+
 // Close closes all resources
 func (c *Client) Close() error {
+	if c.contractDiscovery != nil {
+		c.contractDiscovery.Stop()
+	}
 	if c.bridge != nil {
 		c.bridge.Close()
 	}
@@ -350,18 +409,19 @@ func (c *Client) Close() error {
 
 // clientConfig holds client configuration
 type clientConfig struct {
-	logger             *slog.Logger
-	enableFIFO         bool
-	serviceName        string
-	queueBindings      []messaging.QueueBinding
-	publishPipeline    *interceptors.Pipeline
-	subscribePipeline  *interceptors.Pipeline
-	retryPolicy        reliability.RetryPolicy
-	dlqHandler         *reliability.DLQHandler
-	enableDefaultRetry bool
-	metricsCollector   interceptors.MetricsCollector
-	enableDefaultMetrics bool
-	circuitBreaker     *reliability.CircuitBreaker
+	logger                  *slog.Logger
+	enableFIFO              bool
+	serviceName             string
+	queueBindings           []messaging.QueueBinding
+	publishPipeline         *interceptors.Pipeline
+	subscribePipeline       *interceptors.Pipeline
+	retryPolicy             reliability.RetryPolicy
+	dlqHandler              *reliability.DLQHandler
+	enableDefaultRetry      bool
+	metricsCollector        interceptors.MetricsCollector
+	enableDefaultMetrics    bool
+	circuitBreaker          *reliability.CircuitBreaker
+	enableContractDiscovery bool
 }
 
 // ClientOption configures the client
@@ -463,5 +523,12 @@ func WithDefaultMetrics() ClientOption {
 func WithCircuitBreaker(cb *reliability.CircuitBreaker) ClientOption {
 	return func(cfg *clientConfig) {
 		cfg.circuitBreaker = cb
+	}
+}
+
+// WithContractDiscovery enables contract discovery
+func WithContractDiscovery() ClientOption {
+	return func(cfg *clientConfig) {
+		cfg.enableContractDiscovery = true
 	}
 }

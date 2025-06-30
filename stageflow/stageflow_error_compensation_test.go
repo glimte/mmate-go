@@ -12,11 +12,12 @@ import (
 
 	"github.com/glimte/mmate-go/internal/reliability"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 )
 
 // Test error handling in stage execution
 func TestStageErrorHandling(t *testing.T) {
-	t.Run("Required stage failure stops workflow", func(t *testing.T) {
+	t.Run("Queue-based workflow execution publishes to first stage", func(t *testing.T) {
 		engine := createTestEngineWithStore()
 		workflow := NewWorkflow("test-workflow", "Test Workflow")
 
@@ -42,19 +43,17 @@ func TestStageErrorHandling(t *testing.T) {
 
 		engine.RegisterWorkflow(workflow)
 
-		// Execute workflow
+		// Execute workflow - in queue-based mode, this publishes first message
 		ctx := context.Background()
 		state, err := engine.ExecuteWorkflow(ctx, "test-workflow", nil)
 
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "critical failure")
-		assert.Equal(t, WorkflowFailed, state.Status)
-		assert.False(t, stage3Executed, "Stage 3 should not have executed")
+		// Queue-based execution: Execute() succeeds if message is published
+		assert.NoError(t, err, "Execute should succeed - publishes to first stage queue")
+		assert.Equal(t, WorkflowRunning, state.Status)
+		assert.False(t, stage3Executed, "Stage 3 should not have executed yet")
 		
-		// Verify only stage 1 completed
-		assert.Len(t, state.StageResults, 1)
-		assert.Equal(t, "stage-1", state.StageResults[0].StageID)
-		assert.Equal(t, StageCompleted, state.StageResults[0].Status)
+		// Initial state should have no completed stages (execution is async)
+		assert.Len(t, state.StageResults, 0, "No stages completed yet - execution is asynchronous")
 	})
 
 	t.Run("Optional stage failure continues workflow", func(t *testing.T) {
@@ -594,7 +593,17 @@ func TestConcurrentErrorHandling(t *testing.T) {
 // Helper to create test engine with in-memory store
 func createTestEngineWithStore() *StageFlowEngine {
 	store := NewInMemoryStateStore()
+	// Create mock publisher and subscriber for testing
+	publisher := &mockPublisher{}
+	subscriber := &mockSubscriber{}
+	
+	// Setup mock expectations
+	publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	subscriber.On("Subscribe", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	
 	return &StageFlowEngine{
+		publisher:  publisher,
+		subscriber: subscriber,
 		stateStore: store,
 		workflows:  make(map[string]*Workflow),
 		logger:     slog.Default(),

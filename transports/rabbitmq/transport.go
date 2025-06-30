@@ -240,6 +240,7 @@ func (t *Transport) declareExchanges(ctx context.Context) error {
 		{"mmate.commands", "topic"},
 		{"mmate.events", "topic"},
 		{"mmate.queries", "topic"},
+		{"mmate.messages", "topic"}, // General messages exchange
 		{"mmate.dlx", "topic"}, // Dead letter exchange
 	}
 
@@ -323,8 +324,27 @@ func (s *subscriberAdapter) Subscribe(ctx context.Context, queue string, handler
 		return fmt.Errorf("failed to create channel: %w", err)
 	}
 
-	// Queue should already exist from client initialization
-	// No need to declare here - just consume from existing queue
+	// For temporary reply queues (AutoDelete=true, Exclusive=true), create the queue
+	// This enables the Bridge pattern to work without exposing queue creation in interfaces
+	if options.AutoDelete && options.Exclusive {
+		args := make(amqp.Table)
+		for k, v := range options.Arguments {
+			args[k] = v
+		}
+		
+		_, err = channel.QueueDeclare(
+			queue,
+			false,              // durable=false for temporary queues
+			options.AutoDelete, // auto-delete=true
+			options.Exclusive,  // exclusive=true
+			false,              // no-wait
+			args,
+		)
+		if err != nil {
+			channel.Close()
+			return fmt.Errorf("failed to declare temporary queue %s: %w", queue, err)
+		}
+	}
 
 	// Set QoS
 	if err := channel.Qos(options.PrefetchCount, 0, false); err != nil {
@@ -372,7 +392,9 @@ func (s *subscriberAdapter) Subscribe(ctx context.Context, queue string, handler
 				}
 				// Wrap delivery and call handler
 				delivery := &deliveryAdapter{delivery: d}
-				handler(delivery)
+				if err := handler(delivery); err != nil {
+					fmt.Printf("[Transport] Handler error for queue %s: %v\n", queue, err)
+				}
 			}
 		}
 	}()

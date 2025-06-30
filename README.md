@@ -1,4 +1,4 @@
-# 🚀 Mmate-Go: Enterprise Messaging Made Simple
+# 🚀 Mmate-Go: Enterprise Messaging Made Simple by Message Mate
 
 <div align="center">
 

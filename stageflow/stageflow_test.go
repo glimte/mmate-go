@@ -237,7 +237,12 @@ func TestWorkflowExecution(t *testing.T) {
 	t.Run("Execute workflow with successful stages", func(t *testing.T) {
 		publisher := &mockPublisher{}
 		subscriber := &mockSubscriber{}
+		
+		// Setup mock expectations for queue-based execution
+		publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		
 		engine := NewStageFlowEngine(publisher, subscriber)
+		engine.SetServiceQueue("test-queue")
 		
 		// Create workflow with two stages
 		handler1 := &testStageHandler{stageID: "stage1"}
@@ -250,24 +255,30 @@ func TestWorkflowExecution(t *testing.T) {
 		err := engine.RegisterWorkflow(workflow)
 		assert.NoError(t, err)
 		
-		// Execute workflow
+		// Execute workflow - in queue-based model, this publishes first message
 		initialData := map[string]interface{}{"input": "test"}
 		state, err := workflow.Execute(context.Background(), initialData)
 		
 		assert.NoError(t, err)
 		assert.NotNil(t, state)
-		assert.Equal(t, WorkflowCompleted, state.Status)
-		assert.Len(t, state.StageResults, 2)
-		assert.Equal(t, "stage1", state.StageResults[0].StageID)
-		assert.Equal(t, StageCompleted, state.StageResults[0].Status)
-		assert.Equal(t, "stage2", state.StageResults[1].StageID)
-		assert.Equal(t, StageCompleted, state.StageResults[1].Status)
+		// Queue-based execution starts as running
+		assert.Equal(t, WorkflowRunning, state.Status)
+		// No stages completed yet - execution is asynchronous
+		assert.Len(t, state.StageResults, 0)
+		
+		// Verify that the first stage message was published
+		publisher.AssertCalled(t, "Publish", mock.Anything, mock.AnythingOfType("*stageflow.FlowMessageEnvelope"), mock.Anything)
 	})
 	
 	t.Run("Execute workflow fails when required stage fails", func(t *testing.T) {
 		publisher := &mockPublisher{}
 		subscriber := &mockSubscriber{}
+		
+		// Setup mock expectations for queue-based execution
+		publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		
 		engine := NewStageFlowEngine(publisher, subscriber)
+		engine.SetServiceQueue("test-queue")
 		
 		// Create workflow with failing stage
 		handler1 := &testStageHandler{stageID: "stage1"}
@@ -283,20 +294,28 @@ func TestWorkflowExecution(t *testing.T) {
 		err := engine.RegisterWorkflow(workflow)
 		assert.NoError(t, err)
 		
-		// Execute workflow
+		// Execute workflow - queue-based execution returns immediately
 		initialData := map[string]interface{}{"input": "test"}
 		state, err := workflow.Execute(context.Background(), initialData)
 		
-		assert.Error(t, err)
+		// In queue-based model, Execute() succeeds and publishes first message
+		assert.NoError(t, err)
 		assert.NotNil(t, state)
-		assert.Equal(t, WorkflowFailed, state.Status)
-		assert.Contains(t, err.Error(), "required stage stage2 failed")
+		assert.Equal(t, WorkflowRunning, state.Status)
+		
+		// Verify message was published
+		publisher.AssertCalled(t, "Publish", mock.Anything, mock.AnythingOfType("*stageflow.FlowMessageEnvelope"), mock.Anything)
 	})
 	
 	t.Run("Execute workflow continues when optional stage fails", func(t *testing.T) {
 		publisher := &mockPublisher{}
 		subscriber := &mockSubscriber{}
+		
+		// Setup mock expectations for queue-based execution
+		publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		
 		engine := NewStageFlowEngine(publisher, subscriber)
+		engine.SetServiceQueue("test-queue")
 		
 		// Create workflow with optional failing stage
 		handler1 := &testStageHandler{stageID: "stage1"}
@@ -314,17 +333,18 @@ func TestWorkflowExecution(t *testing.T) {
 		err := engine.RegisterWorkflow(workflow)
 		assert.NoError(t, err)
 		
-		// Execute workflow
+		// Execute workflow - queue-based execution returns immediately
 		initialData := map[string]interface{}{"input": "test"}
 		state, err := workflow.Execute(context.Background(), initialData)
 		
+		// In queue-based model, Execute() succeeds and publishes first message
 		assert.NoError(t, err)
 		assert.NotNil(t, state)
-		assert.Equal(t, WorkflowCompleted, state.Status)
-		assert.Len(t, state.StageResults, 3)
-		assert.Equal(t, StageCompleted, state.StageResults[0].Status)
-		assert.Equal(t, StageFailed, state.StageResults[1].Status)
-		assert.Equal(t, StageCompleted, state.StageResults[2].Status)
+		assert.Equal(t, WorkflowRunning, state.Status)
+		assert.Len(t, state.StageResults, 0) // No stages completed yet
+		
+		// Verify message was published
+		publisher.AssertCalled(t, "Publish", mock.Anything, mock.AnythingOfType("*stageflow.FlowMessageEnvelope"), mock.Anything)
 	})
 	
 	t.Run("Execute workflow fails without engine", func(t *testing.T) {

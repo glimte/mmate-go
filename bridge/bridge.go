@@ -399,6 +399,42 @@ func (b *SyncAsyncBridge) GetPendingRequestCount() int {
 	return len(b.pendingRequests)
 }
 
+// RequestCommandTyped sends a command and waits for a typed reply
+// This is a type-safe version that eliminates the need for type assertions
+func RequestCommandTyped[T contracts.Reply](b *SyncAsyncBridge, ctx context.Context, cmd contracts.Command, timeout time.Duration) (T, error) {
+	var zero T
+	
+	reply, err := b.RequestCommand(ctx, cmd, timeout)
+	if err != nil {
+		return zero, err
+	}
+	
+	typed, ok := reply.(T)
+	if !ok {
+		return zero, fmt.Errorf("unexpected reply type: got %T, want %T", reply, zero)
+	}
+	
+	return typed, nil
+}
+
+// RequestQueryTyped sends a query and waits for a typed reply
+// This is a type-safe version that eliminates the need for type assertions
+func RequestQueryTyped[T contracts.Reply](b *SyncAsyncBridge, ctx context.Context, query contracts.Query, timeout time.Duration) (T, error) {
+	var zero T
+	
+	reply, err := b.RequestQuery(ctx, query, timeout)
+	if err != nil {
+		return zero, err
+	}
+	
+	typed, ok := reply.(T)
+	if !ok {
+		return zero, fmt.Errorf("unexpected reply type: got %T, want %T", reply, zero)
+	}
+	
+	return typed, nil
+}
+
 // Close shuts down the bridge and cleans up resources
 func (b *SyncAsyncBridge) Close() error {
 	// Stop cleanup routine

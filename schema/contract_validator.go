@@ -150,8 +150,8 @@ func (cv *ContractValidator) GenerateJSONSchema(messageType string) (json.RawMes
 	// If no schema registered, try to generate from type
 	factory, err := serialization.GetGlobalRegistry().GetFactory(messageType)
 	if err != nil {
-		// Fall back to basic generator
-		return cv.schemaGenerator.GenerateFromType(messageType)
+		// Return error for unknown types
+		return nil, fmt.Errorf("unknown message type: %s", messageType)
 	}
 
 	// Create instance and generate schema

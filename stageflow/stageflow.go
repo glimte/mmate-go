@@ -140,13 +140,14 @@ type Workflow struct {
 
 // StageFlowEngine manages workflow execution
 type StageFlowEngine struct {
-	publisher    messaging.Publisher
-	subscriber   messaging.Subscriber
-	stateStore   StateStore
-	workflows    map[string]*Workflow
-	serviceQueue string
-	mu           sync.RWMutex
-	logger       *slog.Logger
+	publisher         messaging.Publisher
+	subscriber        messaging.Subscriber
+	stateStore        StateStore
+	workflows         map[string]*Workflow
+	serviceQueue      string
+	mu                sync.RWMutex
+	logger            *slog.Logger
+	contractExtractor messaging.ContractExtractor
 }
 
 // EngineOption configures the stage flow engine
@@ -256,6 +257,17 @@ func (e *StageFlowEngine) RegisterWorkflow(workflow *Workflow) error {
 	e.mu.Unlock()
 
 	e.logger.Info("registered workflow", "workflowId", workflow.ID, "name", workflow.Name, "stages", len(workflow.Stages))
+	
+	// Extract and publish contract if extractor is configured
+	// For now, we pass nil as input type since workflows don't have explicit input message types
+	// In the future, we could enhance workflows to declare their trigger message type
+	if e.contractExtractor != nil {
+		ctx := context.Background()
+		if err := e.contractExtractor.ExtractFromWorkflow(ctx, workflow.ID, workflow.Name, nil); err != nil {
+			e.logger.Warn("failed to extract workflow contract", "error", err, "workflowId", workflow.ID)
+		}
+	}
+	
 	return nil
 }
 
@@ -276,6 +288,13 @@ func (e *StageFlowEngine) GetWorkflow(workflowID string) (*Workflow, error) {
 func (e *StageFlowEngine) SetServiceQueue(queueName string) {
 	e.serviceQueue = queueName
 	e.logger.Info("service queue set for stageflow", "queue", queueName)
+}
+
+// SetContractExtractor sets the contract extractor for workflow registration
+func (e *StageFlowEngine) SetContractExtractor(extractor messaging.ContractExtractor) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.contractExtractor = extractor
 }
 
 // ExecuteWorkflow starts execution of a workflow

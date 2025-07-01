@@ -2,6 +2,7 @@ package messaging
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/glimte/mmate-go/contracts"
@@ -12,6 +13,37 @@ import (
 type mockContractPublisher struct {
 	published []contracts.Message
 }
+
+type mockContractTransport struct {
+	queues map[string]QueueOptions
+}
+
+func newMockContractTransport() *mockContractTransport {
+	return &mockContractTransport{
+		queues: make(map[string]QueueOptions),
+	}
+}
+
+func (m *mockContractTransport) Publisher() TransportPublisher { return nil }
+func (m *mockContractTransport) Subscriber() TransportSubscriber { return nil }
+func (m *mockContractTransport) CreateQueue(ctx context.Context, name string, options QueueOptions) error {
+	m.queues[name] = options
+	return nil
+}
+func (m *mockContractTransport) DeleteQueue(ctx context.Context, name string) error {
+	delete(m.queues, name)
+	return nil
+}
+func (m *mockContractTransport) BindQueue(ctx context.Context, queue, exchange, routingKey string) error {
+	return nil
+}
+func (m *mockContractTransport) DeclareQueueWithBindings(ctx context.Context, name string, options QueueOptions, bindings []QueueBinding) error {
+	m.queues[name] = options
+	return nil
+}
+func (m *mockContractTransport) Connect(ctx context.Context) error { return nil }
+func (m *mockContractTransport) Close() error { return nil }
+func (m *mockContractTransport) IsConnected() bool { return true }
 
 func (m *mockContractPublisher) Publish(ctx context.Context, msg contracts.Message, options ...PublishOption) error {
 	m.published = append(m.published, msg)
@@ -90,10 +122,11 @@ func (m *TestMessage) GetType() string {
 func TestNewContractDiscovery(t *testing.T) {
 	setupTestTypes(t)
 	
+	transport := newMockContractTransport()
 	pub := &mockContractPublisher{}
 	sub := newMockContractSubscriber()
 	
-	cd := NewContractDiscovery(sub, pub, WithServiceName("test-service"))
+	cd := NewContractDiscovery(transport, sub, pub, WithServiceName("test-service"))
 	
 	if cd == nil {
 		t.Fatal("NewContractDiscovery returned nil")
@@ -111,11 +144,12 @@ func TestNewContractDiscovery(t *testing.T) {
 func TestContractDiscovery_RegisterEndpoint(t *testing.T) {
 	setupTestTypes(t)
 	
+	transport := newMockContractTransport()
 	pub := &mockContractPublisher{}
 	sub := newMockContractSubscriber()
 	validator := schema.NewContractValidator(schema.NewMessageValidator())
 	
-	cd := NewContractDiscovery(sub, pub,
+	cd := NewContractDiscovery(transport, sub, pub,
 		WithServiceName("test-service"),
 		WithContractValidator(validator))
 	
@@ -167,10 +201,11 @@ func TestContractDiscovery_RegisterEndpoint(t *testing.T) {
 func TestContractDiscovery_UnregisterEndpoint(t *testing.T) {
 	setupTestTypes(t)
 	
+	transport := newMockContractTransport()
 	pub := &mockContractPublisher{}
 	sub := newMockContractSubscriber()
 	
-	cd := NewContractDiscovery(sub, pub, WithServiceName("test-service"))
+	cd := NewContractDiscovery(transport, sub, pub, WithServiceName("test-service"))
 	ctx := context.Background()
 	
 	// Register first
@@ -220,10 +255,11 @@ func TestContractDiscovery_UnregisterEndpoint(t *testing.T) {
 func TestContractDiscovery_GetMatchingLocalContracts(t *testing.T) {
 	setupTestTypes(t)
 	
+	transport := newMockContractTransport()
 	pub := &mockContractPublisher{}
 	sub := newMockContractSubscriber()
 	
-	cd := NewContractDiscovery(sub, pub)
+	cd := NewContractDiscovery(transport, sub, pub)
 	ctx := context.Background()
 	
 	// Register multiple contracts
@@ -308,15 +344,21 @@ func TestContractDiscovery_GetMatchingLocalContracts(t *testing.T) {
 func TestContractDiscovery_Start(t *testing.T) {
 	setupTestTypes(t)
 	
+	transport := newMockContractTransport()
 	pub := &mockContractPublisher{}
 	sub := newMockContractSubscriber()
 	
-	cd := NewContractDiscovery(sub, pub)
+	cd := NewContractDiscovery(transport, sub, pub)
 	ctx := context.Background()
 	
 	err := cd.Start(ctx)
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
+	}
+	
+	// Check discovery queue was created
+	if _, ok := transport.queues[contractDiscoveryQueue]; !ok {
+		t.Error("Expected discovery queue to be created")
 	}
 	
 	// Check subscriptions were created
@@ -329,9 +371,10 @@ func TestContractDiscovery_Start(t *testing.T) {
 		t.Error("Expected subscription to discovery queue")
 	}
 	
-	// Check announcement subscription
-	if _, ok := sub.subscriptions[contractAnnounceRoutingKey]; !ok {
-		t.Error("Expected subscription to announcement topic")
+	// Check announcement subscription - it should be to the service-specific queue
+	announcementQueue := fmt.Sprintf("contract.announce.%s", cd.serviceName)
+	if _, ok := sub.subscriptions[announcementQueue]; !ok {
+		t.Error("Expected subscription to announcement queue")
 	}
 	
 	// Stop the service
@@ -344,10 +387,11 @@ func TestContractDiscovery_Start(t *testing.T) {
 func TestContractDiscovery_HandleDiscoveryRequest(t *testing.T) {
 	setupTestTypes(t)
 	
+	transport := newMockContractTransport()
 	pub := &mockContractPublisher{}
 	sub := newMockContractSubscriber()
 	
-	cd := NewContractDiscovery(sub, pub)
+	cd := NewContractDiscovery(transport, sub, pub)
 	ctx := context.Background()
 	
 	// Register a contract
@@ -395,10 +439,11 @@ func TestContractDiscovery_HandleDiscoveryRequest(t *testing.T) {
 func TestContractDiscovery_DiscoverEndpoint(t *testing.T) {
 	setupTestTypes(t)
 	
+	transport := newMockContractTransport()
 	pub := &mockContractPublisher{}
 	sub := newMockContractSubscriber()
 	
-	cd := NewContractDiscovery(sub, pub)
+	cd := NewContractDiscovery(transport, sub, pub)
 	ctx := context.Background()
 	
 	// Register a local contract

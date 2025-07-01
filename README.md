@@ -248,22 +248,17 @@ Teams using Mmate-Go ship messaging features 10x faster with built-in reliabilit
 ## 🛣️ **Messaging Framework Roadmap**
 
 ### ✅ **Current (v1.0)**
-- RabbitMQ message broker transport
+- RabbitMQ message broker transport integration
 - Enterprise message queue reliability features
 - Message workflow orchestration  
 - Service-scoped message monitoring
 
-### 🔜 **Coming Soon (v1.1)**
+### 🔜 **Planned Features**
 - **Multi-Transport Support** - Kafka, Redis Pub/Sub, In-Memory message queues
 - **Message Queue Metrics** - Built-in Prometheus exporter
 - **gRPC Integration** - Hybrid messaging architectures
 - **Cloud Message Queue Support** - AWS SQS, Azure Service Bus, GCP Pub/Sub
 
-### 🎯 **Future (v2.0)**
-- **Visual Message Flow Designer** 
-- **Message Queue Auto-scaling**
-- **Multi-cloud Message Routing**
-- **GraphQL Subscriptions** - Real-time messaging integration
 
 ## 🤝 **Contributing to This Messaging Framework**
 

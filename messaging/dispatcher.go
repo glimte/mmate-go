@@ -40,10 +40,11 @@ type HandlerOptions struct {
 
 // MessageDispatcher routes messages to appropriate handlers
 type MessageDispatcher struct {
-	handlers   map[string][]HandlerRegistration
-	mu         sync.RWMutex
-	logger     *slog.Logger
-	middleware []MiddlewareFunc
+	handlers          map[string][]HandlerRegistration
+	mu                sync.RWMutex
+	logger            *slog.Logger
+	middleware        []MiddlewareFunc
+	contractExtractor ContractExtractor
 }
 
 // MiddlewareFunc processes messages before they reach handlers
@@ -63,6 +64,13 @@ func WithDispatcherLogger(logger *slog.Logger) DispatcherOption {
 func WithMiddleware(middleware ...MiddlewareFunc) DispatcherOption {
 	return func(d *MessageDispatcher) {
 		d.middleware = append(d.middleware, middleware...)
+	}
+}
+
+// WithContractExtractor sets the contract extractor
+func WithContractExtractor(extractor ContractExtractor) DispatcherOption {
+	return func(d *MessageDispatcher) {
+		d.contractExtractor = extractor
 	}
 }
 
@@ -128,7 +136,22 @@ func (d *MessageDispatcher) RegisterHandler(messageType contracts.Message, handl
 		"concurrency", opts.Concurrency,
 	)
 
+	// Extract and publish contract if extractor is configured
+	if d.contractExtractor != nil {
+		ctx := context.Background()
+		if err := d.contractExtractor.ExtractFromHandler(ctx, messageType, handler, opts); err != nil {
+			d.logger.Warn("failed to extract contract", "error", err, "messageType", typeName)
+		}
+	}
+
 	return nil
+}
+
+// SetContractExtractor sets the contract extractor (can be called after creation)
+func (d *MessageDispatcher) SetContractExtractor(extractor ContractExtractor) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.contractExtractor = extractor
 }
 
 // RegisterHandlerFunc registers a function as a handler

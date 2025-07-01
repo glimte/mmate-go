@@ -240,8 +240,9 @@ func (t *Transport) declareExchanges(ctx context.Context) error {
 		{"mmate.commands", "topic"},
 		{"mmate.events", "topic"},
 		{"mmate.queries", "topic"},
-		{"mmate.messages", "topic"}, // General messages exchange
-		{"mmate.dlx", "topic"}, // Dead letter exchange
+		{"mmate.messages", "topic"},  // General messages exchange
+		{"mmate.contracts", "topic"}, // Contract publishing exchange
+		{"mmate.dlx", "topic"},       // Dead letter exchange
 	}
 
 	for _, ex := range exchanges {

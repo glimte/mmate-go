@@ -29,6 +29,7 @@ import (
 	"github.com/glimte/mmate-go/internal/reliability"
 	"github.com/glimte/mmate-go/monitor"
 	"github.com/glimte/mmate-go/schema"
+	"github.com/glimte/mmate-go/stageflow"
 )
 
 // Client provides the main entry point for mmate-go
@@ -78,8 +79,10 @@ func NewClientWithOptions(connectionString string, options ...ClientOption) (*Cl
 		return nil, fmt.Errorf("failed to create transport: %w", err)
 	}
 
-	// Create dispatcher
-	dispatcher := messaging.NewMessageDispatcher()
+	// Create dispatcher (will configure contract extractor later if enabled)
+	dispatcher := messaging.NewMessageDispatcher(
+		messaging.WithDispatcherLogger(cfg.logger),
+	)
 
 	// Determine which metrics collector to use (shared across all pipelines)
 	var sharedMetricsCollector interceptors.MetricsCollector
@@ -182,13 +185,14 @@ func NewClientWithOptions(connectionString string, options ...ClientOption) (*Cl
 
 	// Create contract discovery if enabled
 	var contractDiscovery *messaging.ContractDiscovery
-	if cfg.enableContractDiscovery {
+	if cfg.enableContractPublishing {
 		// Create validator
 		validator := schema.NewMessageValidator()
 		contractValidator := schema.NewContractValidator(validator)
 		
 		// Create contract discovery
 		contractDiscovery = messaging.NewContractDiscovery(
+			transport,
 			subscriber,
 			publisher,
 			messaging.WithServiceName(cfg.serviceName),
@@ -200,7 +204,11 @@ func NewClientWithOptions(connectionString string, options ...ClientOption) (*Cl
 			return nil, fmt.Errorf("failed to start contract discovery: %w", err)
 		}
 		
-		cfg.logger.Info("Contract discovery enabled", "service", cfg.serviceName)
+		// Create and set contract extractor on dispatcher
+		contractExtractor := messaging.NewContractExtractor(contractDiscovery, cfg.serviceName)
+		dispatcher.SetContractExtractor(contractExtractor)
+		
+		cfg.logger.Info("Contract publishing enabled", "service", cfg.serviceName)
 	}
 
 	return &Client{
@@ -341,7 +349,7 @@ func (c *Client) GetAdvancedMetrics() *monitor.AdvancedMetricsReport {
 }
 
 // getChannelPoolFromTransport creates a channel pool for monitoring purposes
-func (c *Client) getChannelPoolFromTransport(transport *rabbitmqTransport.Transport) (*rabbitmq.ChannelPool, error) {
+func (c *Client) getChannelPoolFromTransport(_ *rabbitmqTransport.Transport) (*rabbitmq.ChannelPool, error) {
 	// Create a new connection manager for monitoring
 	// This ensures monitoring doesn't interfere with the main transport
 	connManager := rabbitmq.NewConnectionManager(c.connectionString)
@@ -414,6 +422,22 @@ func (c *Client) PublishReply(ctx context.Context, reply contracts.Reply, replyT
 	return c.publisher.PublishReply(ctx, reply, replyTo, options...)
 }
 
+// NewStageFlowEngine creates a new StageFlow engine with contract extraction if enabled
+func (c *Client) NewStageFlowEngine(opts ...stageflow.EngineOption) *stageflow.StageFlowEngine {
+	engine := stageflow.NewStageFlowEngine(c.publisher, c.subscriber, opts...)
+	
+	// Set contract extractor if contract publishing is enabled
+	if c.contractDiscovery != nil {
+		contractExtractor := messaging.NewContractExtractor(c.contractDiscovery, c.serviceName)
+		engine.SetContractExtractor(contractExtractor)
+	}
+	
+	// Set service queue
+	engine.SetServiceQueue(c.receiveQueue)
+	
+	return engine
+}
+
 // Close closes all resources
 func (c *Client) Close() error {
 	if c.contractDiscovery != nil {
@@ -448,7 +472,7 @@ type clientConfig struct {
 	metricsCollector        interceptors.MetricsCollector
 	enableDefaultMetrics    bool
 	circuitBreaker          *reliability.CircuitBreaker
-	enableContractDiscovery bool
+	enableContractPublishing bool
 }
 
 // ClientOption configures the client
@@ -553,9 +577,9 @@ func WithCircuitBreaker(cb *reliability.CircuitBreaker) ClientOption {
 	}
 }
 
-// WithContractDiscovery enables contract discovery
-func WithContractDiscovery() ClientOption {
+// WithContractPublishing enables contract publishing and discovery
+func WithContractPublishing() ClientOption {
 	return func(cfg *clientConfig) {
-		cfg.enableContractDiscovery = true
+		cfg.enableContractPublishing = true
 	}
 }

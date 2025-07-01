@@ -11,13 +11,15 @@ import (
 
 // ContractValidator validates endpoint contracts with schema integration
 type ContractValidator struct {
-	validator *MessageValidator
+	validator       *MessageValidator
+	schemaGenerator *JSONSchemaGenerator
 }
 
 // NewContractValidator creates a new contract validator
 func NewContractValidator(validator *MessageValidator) *ContractValidator {
 	return &ContractValidator{
-		validator: validator,
+		validator:       validator,
+		schemaGenerator: NewJSONSchemaGenerator(),
 	}
 }
 
@@ -67,21 +69,31 @@ func (cv *ContractValidator) EnrichContractWithSchemas(contract *contracts.Endpo
 		return fmt.Errorf("contract cannot be nil")
 	}
 
-	// Get schemas from validator's registry
+	// Try to get schemas from validator's registry first
 	if inputSchema, err := cv.validator.GetSchema(contract.InputType); err == nil {
 		// Convert schema to JSON
 		schemaJSON, err := json.Marshal(inputSchema)
 		if err == nil {
 			contract.InputSchema = schemaJSON
 		}
+	} else {
+		// Fall back to generator
+		if err := cv.schemaGenerator.GenerateForContract(contract); err != nil {
+			// Log but don't fail - schemas are optional enrichment
+			return nil
+		}
 	}
 
+	// For output schema, use existing if available
 	if outputSchema, err := cv.validator.GetSchema(contract.OutputType); err == nil {
 		// Convert schema to JSON
 		schemaJSON, err := json.Marshal(outputSchema)
 		if err == nil {
 			contract.OutputSchema = schemaJSON
 		}
+	} else if len(contract.InputSchema) == 0 {
+		// Only generate if we haven't already done it
+		cv.schemaGenerator.GenerateForContract(contract)
 	}
 
 	return nil
@@ -129,32 +141,21 @@ func (cv *ContractValidator) ValidateMessageAgainstContract(ctx context.Context,
 
 // GenerateJSONSchema generates a JSON Schema for a message type
 func (cv *ContractValidator) GenerateJSONSchema(messageType string) (json.RawMessage, error) {
+	// First try to get from validator's registry
 	schema, err := cv.validator.GetSchema(messageType)
+	if err == nil {
+		return json.Marshal(schema)
+	}
+
+	// If no schema registered, try to generate from type
+	factory, err := serialization.GetGlobalRegistry().GetFactory(messageType)
 	if err != nil {
-		// If no schema registered, try to generate from type
-		factory, err := serialization.GetGlobalRegistry().GetFactory(messageType)
-		if err != nil {
-			return nil, fmt.Errorf("type %s not found in registry", messageType)
-		}
-
-		// Create instance and generate schema
-		msg := factory()
-		generatedSchema := cv.generateSchemaFromMessage(msg)
-		return json.Marshal(generatedSchema)
+		// Return error for unknown types
+		return nil, fmt.Errorf("unknown message type: %s", messageType)
 	}
 
-	return json.Marshal(schema)
+	// Create instance and generate schema
+	msg := factory()
+	return cv.schemaGenerator.GenerateFromMessage(msg)
 }
 
-// generateSchemaFromMessage generates a basic schema from a message instance
-func (cv *ContractValidator) generateSchemaFromMessage(msg contracts.Message) *Schema {
-	// Basic schema generation
-	// In a real implementation, this would use reflection to build a proper schema
-	return &Schema{
-		Name:        msg.GetType(),
-		Version:     "1.0.0",
-		Type:        "object",
-		Properties:  make(map[string]*PropertyDef),
-		Required:    []string{"id", "type", "timestamp"},
-	}
-}

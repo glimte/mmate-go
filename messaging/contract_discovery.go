@@ -13,7 +13,7 @@ import (
 const (
 	// Discovery queue and routing
 	contractDiscoveryQueue    = "contract.discover"
-	contractAnnounceExchange  = "mmate.topic"
+	contractAnnounceExchange  = "mmate.contracts"
 	contractAnnounceRoutingKey = "contract.announce"
 	
 	// Default timeouts
@@ -23,6 +23,7 @@ const (
 
 // ContractDiscovery handles endpoint contract discovery
 type ContractDiscovery struct {
+	transport   Transport
 	subscriber  Subscriber
 	publisher   Publisher
 	contracts   map[string]*contracts.EndpointContract
@@ -50,8 +51,9 @@ func WithServiceName(name string) ContractDiscoveryOption {
 }
 
 // NewContractDiscovery creates a new contract discovery instance
-func NewContractDiscovery(subscriber Subscriber, publisher Publisher, opts ...ContractDiscoveryOption) *ContractDiscovery {
+func NewContractDiscovery(transport Transport, subscriber Subscriber, publisher Publisher, opts ...ContractDiscoveryOption) *ContractDiscovery {
 	cd := &ContractDiscovery{
+		transport:   transport,
 		subscriber:  subscriber,
 		publisher:   publisher,
 		contracts:   make(map[string]*contracts.EndpointContract),
@@ -73,14 +75,57 @@ func NewContractDiscovery(subscriber Subscriber, publisher Publisher, opts ...Co
 
 // Start starts the contract discovery service
 func (cd *ContractDiscovery) Start(ctx context.Context) error {
+	// Register contract message types
+	Register("ContractDiscoveryRequest", func() contracts.Message { return &contracts.ContractDiscoveryRequest{} })
+	Register("ContractDiscoveryResponse", func() contracts.Message { return &contracts.ContractDiscoveryResponse{} })
+	Register("ContractAnnouncement", func() contracts.Message { return &contracts.ContractAnnouncement{} })
+	
+	// Register placeholder types for workflows and handlers without specific types
+	Register("WorkflowTrigger", func() contracts.Message { return &contracts.BaseMessage{} })
+	Register("WorkflowResult", func() contracts.Message { return &contracts.BaseMessage{} })
+	Register("None", func() contracts.Message { return &contracts.BaseMessage{} })
+	
+	// Create discovery queue
+	queueOpts := QueueOptions{
+		Durable:    true,
+		AutoDelete: false,
+		Exclusive:  false,
+	}
+	
+	if err := cd.transport.CreateQueue(ctx, contractDiscoveryQueue, queueOpts); err != nil {
+		return fmt.Errorf("failed to create discovery queue: %w", err)
+	}
+	
+	// Ensure topic exchange exists (most transports create exchanges automatically,
+	// but we'll bind to ensure it exists)
+	// For contract announcements, we'll use topic-based subscriptions
+	
 	// Subscribe to discovery requests
 	if err := cd.subscriber.Subscribe(ctx, contractDiscoveryQueue, "ContractDiscoveryRequest", 
 		NewAutoAcknowledgingHandler(MessageHandlerFunc(cd.handleDiscoveryRequest))); err != nil {
 		return fmt.Errorf("failed to subscribe to discovery queue: %w", err)
 	}
 
+	// Create a unique queue for contract announcements and bind it to the topic exchange
+	announcementQueue := fmt.Sprintf("contract.announce.%s", cd.serviceName)
+	announcementQueueOpts := QueueOptions{
+		Durable:    false,
+		AutoDelete: true,
+		Exclusive:  false,
+	}
+	
+	// Create the announcement queue with binding to topic exchange
+	if err := cd.transport.DeclareQueueWithBindings(ctx, announcementQueue, announcementQueueOpts, []QueueBinding{
+		{
+			Exchange:   contractAnnounceExchange,
+			RoutingKey: contractAnnounceRoutingKey,
+		},
+	}); err != nil {
+		return fmt.Errorf("failed to create announcement queue: %w", err)
+	}
+	
 	// Subscribe to contract announcements
-	if err := cd.subscriber.Subscribe(ctx, contractAnnounceRoutingKey, "ContractAnnouncement",
+	if err := cd.subscriber.Subscribe(ctx, announcementQueue, "ContractAnnouncement",
 		NewAutoAcknowledgingHandler(MessageHandlerFunc(cd.handleContractAnnouncement))); err != nil {
 		return fmt.Errorf("failed to subscribe to announcements: %w", err)
 	}

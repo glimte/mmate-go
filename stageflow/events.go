@@ -207,3 +207,77 @@ func NewStageCompletedEvent(workflow *Workflow, state *WorkflowState, stage *Sta
 	
 	return event
 }
+
+// WorkflowCompensatedEvent is published when a workflow completes compensation
+type WorkflowCompensatedEvent struct {
+	contracts.BaseEvent
+	
+	// Workflow identification
+	WorkflowID   string `json:"workflowId"`
+	WorkflowName string `json:"workflowName"`
+	InstanceID   string `json:"instanceId"`
+	
+	// Compensation details
+	OriginalError        string    `json:"originalError"`
+	FailureTime          time.Time `json:"failureTime"`
+	CompensationStartTime time.Time `json:"compensationStartTime"`
+	CompensationEndTime   time.Time `json:"compensationEndTime"`
+	CompensationDuration  time.Duration `json:"compensationDuration"`
+	
+	// Compensation results
+	TotalCompensations      int                  `json:"totalCompensations"`
+	SuccessfulCompensations int                  `json:"successfulCompensations"`
+	FailedCompensations     int                  `json:"failedCompensations"`
+	SkippedCompensations    int                  `json:"skippedCompensations"`
+	CompensationResults     []CompensationResult `json:"compensationResults"`
+	
+	// Original workflow data
+	FailedStageIndex int                    `json:"failedStageIndex"`
+	WorkflowData     map[string]interface{} `json:"workflowData"`
+}
+
+// NewWorkflowCompensatedEvent creates a new workflow compensated event
+func NewWorkflowCompensatedEvent(workflow *Workflow, state *WorkflowState, envelope *CompensationMessageEnvelope) *WorkflowCompensatedEvent {
+	event := &WorkflowCompensatedEvent{
+		BaseEvent: contracts.BaseEvent{
+			BaseMessage: contracts.NewBaseMessage("WorkflowCompensatedEvent"),
+			AggregateID: state.InstanceID,
+			Sequence:    int64(state.Version),
+			Source:      "stageflow",
+		},
+		WorkflowID:              workflow.ID,
+		WorkflowName:            workflow.Name,
+		InstanceID:              state.InstanceID,
+		OriginalError:           envelope.OriginalError,
+		FailureTime:             envelope.FailureTimestamp,
+		CompensationStartTime:   envelope.GetTimestamp(),
+		CompensationEndTime:     time.Now(),
+		TotalCompensations:      envelope.TotalCompensations,
+		CompensationResults:     envelope.CompensationResults,
+		FailedStageIndex:        envelope.FailedStageIndex,
+		WorkflowData:            state.GlobalData,
+	}
+	
+	// Calculate compensation duration
+	if len(envelope.CompensationResults) > 0 {
+		firstResult := envelope.CompensationResults[0]
+		lastResult := envelope.CompensationResults[len(envelope.CompensationResults)-1]
+		if lastResult.EndTime != nil {
+			event.CompensationDuration = lastResult.EndTime.Sub(firstResult.StartTime)
+		}
+	}
+	
+	// Count compensation statuses
+	for _, result := range envelope.CompensationResults {
+		switch result.Status {
+		case CompensationCompleted:
+			event.SuccessfulCompensations++
+		case CompensationFailed:
+			event.FailedCompensations++
+		case CompensationSkipped:
+			event.SkippedCompensations++
+		}
+	}
+	
+	return event
+}

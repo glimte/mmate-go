@@ -234,8 +234,10 @@ func NewStageFlowEngine(publisher messaging.Publisher, subscriber messaging.Subs
 
 	// Register message types
 	messaging.Register("FlowMessageEnvelope", func() contracts.Message { return &FlowMessageEnvelope{} })
+	messaging.Register("CompensationMessageEnvelope", func() contracts.Message { return &CompensationMessageEnvelope{} })
 	messaging.Register("WorkflowCompletedEvent", func() contracts.Message { return &WorkflowCompletedEvent{} })
 	messaging.Register("WorkflowFailedEvent", func() contracts.Message { return &WorkflowFailedEvent{} })
+	messaging.Register("WorkflowCompensatedEvent", func() contracts.Message { return &WorkflowCompensatedEvent{} })
 	messaging.Register("StageCompletedEvent", func() contracts.Message { return &StageCompletedEvent{} })
 
 	return engine
@@ -314,9 +316,19 @@ func (e *StageFlowEngine) RegisterWorkflow(workflow *Workflow) error {
 		return fmt.Errorf("failed to create stage queues: %w", err)
 	}
 	
+	// Create compensation queue
+	if err := e.createCompensationQueue(ctx, workflow.ID); err != nil {
+		return fmt.Errorf("failed to create compensation queue: %w", err)
+	}
+	
 	// Subscribe to stage queues
 	if err := e.subscribeToStageQueues(ctx, workflow); err != nil {
 		return fmt.Errorf("failed to subscribe to stage queues: %w", err)
+	}
+	
+	// Subscribe to compensation queue
+	if err := e.subscribeToCompensationQueue(ctx, workflow); err != nil {
+		return fmt.Errorf("failed to subscribe to compensation queue: %w", err)
 	}
 
 	e.mu.Lock()
@@ -729,7 +741,14 @@ func (w *Workflow) processStageMessage(ctx context.Context, envelope *FlowMessag
 				}
 			}
 
-			// TODO: Implement compensation via queue messages
+			// Start queue-based compensation
+			if err := w.startCompensationViaQueue(ctx, &state, envelope.CurrentStageIndex, execErr.Error()); err != nil {
+				w.engine.logger.Error("failed to start compensation via queue",
+					"error", err,
+					"workflowId", envelope.WorkflowID,
+					"instanceId", envelope.InstanceID)
+			}
+			
 			return fmt.Errorf("required stage %s failed: %w", stage.ID, execErr)
 		}
 
@@ -828,7 +847,195 @@ func (w *Workflow) addStageResult(state *WorkflowState, result *StageResult) {
 	}
 }
 
-// compensateStages runs compensation logic for all completed stages in reverse order
+// startCompensationViaQueue starts queue-based compensation for failed workflows
+func (w *Workflow) startCompensationViaQueue(ctx context.Context, state *WorkflowState, failedStageIndex int, originalError string) error {
+	w.engine.logger.Info("starting queue-based compensation",
+		"workflowId", state.WorkflowID,
+		"instanceId", state.InstanceID,
+		"failedStageIndex", failedStageIndex)
+
+	// Create compensation envelope
+	envelope, err := NewCompensationMessageEnvelope(state.WorkflowID, state.InstanceID, failedStageIndex, state, originalError)
+	if err != nil {
+		return fmt.Errorf("failed to create compensation envelope: %w", err)
+	}
+
+	// If there are no stages to compensate, mark as compensated and done
+	if envelope.TotalCompensations == 0 {
+		w.engine.logger.Info("no stages to compensate", "workflowId", state.WorkflowID)
+		return nil
+	}
+
+	// Publish to compensation queue
+	queueName := w.engine.getCompensationQueueName(w.ID)
+	err = w.engine.publisher.Publish(ctx, envelope,
+		messaging.WithExchange(""), // Direct queue delivery
+		messaging.WithRoutingKey(queueName),
+		messaging.WithPersistent(true), // Ensure message persistence
+	)
+	if err != nil {
+		return fmt.Errorf("failed to publish compensation message: %w", err)
+	}
+
+	w.engine.logger.Info("published compensation message",
+		"workflowId", state.WorkflowID,
+		"instanceId", state.InstanceID,
+		"queue", queueName,
+		"totalCompensations", envelope.TotalCompensations)
+
+	return nil
+}
+
+// processCompensationMessage processes a single compensation message from the queue
+func (w *Workflow) processCompensationMessage(ctx context.Context, envelope *CompensationMessageEnvelope) error {
+	w.engine.logger.Info("processing compensation message",
+		"workflowId", envelope.WorkflowID,
+		"instanceId", envelope.InstanceID,
+		"compensationIndex", envelope.CompensationIndex,
+		"stageToCompensate", envelope.StageToCompensate)
+
+	// Deserialize workflow state
+	var state WorkflowState
+	err := json.Unmarshal([]byte(envelope.SerializedWorkflowState), &state)
+	if err != nil {
+		return fmt.Errorf("failed to deserialize workflow state: %w", err)
+	}
+
+	// Deserialize original result
+	var originalResult StageResult
+	if envelope.SerializedOriginalResult != "" {
+		err = json.Unmarshal([]byte(envelope.SerializedOriginalResult), &originalResult)
+		if err != nil {
+			return fmt.Errorf("failed to deserialize original result: %w", err)
+		}
+	}
+
+	// Find the stage to compensate
+	stage, exists := w.stageMap[envelope.StageToCompensate]
+	if !exists {
+		return fmt.Errorf("stage %s not found in workflow", envelope.StageToCompensate)
+	}
+
+	startTime := time.Now()
+	compensationResult := CompensationResult{
+		StageID:           envelope.StageToCompensate,
+		CompensationIndex: envelope.CompensationIndex,
+		Status:            CompensationRunning,
+		StartTime:         startTime,
+	}
+
+	// Execute compensation if handler exists
+	if stage.Compensation != nil {
+		w.engine.logger.Info("executing compensation",
+			"stageId", envelope.StageToCompensate,
+			"workflowId", envelope.WorkflowID)
+
+		err = stage.Compensation.Compensate(ctx, &state, &originalResult)
+		if err != nil {
+			w.engine.logger.Error("compensation failed",
+				"stageId", envelope.StageToCompensate,
+				"error", err.Error())
+
+			compensationResult.Status = CompensationFailed
+			compensationResult.Error = err.Error()
+		} else {
+			w.engine.logger.Info("compensation completed",
+				"stageId", envelope.StageToCompensate)
+
+			compensationResult.Status = CompensationCompleted
+		}
+	} else {
+		w.engine.logger.Info("skipping compensation - no handler",
+			"stageId", envelope.StageToCompensate)
+
+		compensationResult.Status = CompensationSkipped
+	}
+
+	// Finalize compensation result
+	endTime := time.Now()
+	compensationResult.EndTime = &endTime
+	compensationResult.Duration = endTime.Sub(startTime)
+
+	// Add result to envelope
+	envelope.CompensationResults = append(envelope.CompensationResults, compensationResult)
+
+	// Check if this was the last compensation
+	if envelope.CompensationIndex <= 0 {
+		// All compensations completed
+		w.engine.logger.Info("all compensations completed",
+			"workflowId", envelope.WorkflowID,
+			"instanceId", envelope.InstanceID,
+			"totalCompensations", len(envelope.CompensationResults))
+
+		// Update workflow state to compensated
+		state.Status = WorkflowCompensated
+		state.LastModified = time.Now()
+		state.Version++
+
+		// Publish workflow compensated event if enabled
+		if w.engine.enableCompletionEvents {
+			event := NewWorkflowCompensatedEvent(w, &state, envelope)
+			options := append([]messaging.PublishOption{messaging.WithPersistent(true)}, w.engine.completionEventOptions...)
+			if err := w.engine.publisher.PublishEvent(ctx, event, options...); err != nil {
+				w.engine.logger.Error("failed to publish workflow compensated event",
+					"error", err,
+					"workflowId", envelope.WorkflowID,
+					"instanceId", envelope.InstanceID)
+			}
+		}
+
+		return nil
+	}
+
+	// Continue with next compensation
+	return w.continueCompensation(ctx, envelope, &state)
+}
+
+// continueCompensation publishes the next compensation message
+func (w *Workflow) continueCompensation(ctx context.Context, envelope *CompensationMessageEnvelope, state *WorkflowState) error {
+	// Move to next compensation (previous stage in reverse order)
+	envelope.CompensationIndex--
+
+	// Find the next stage to compensate
+	nextCompensationStageIndex := envelope.FailedStageIndex - 1 - (envelope.TotalCompensations - 1 - envelope.CompensationIndex)
+	if nextCompensationStageIndex >= 0 && nextCompensationStageIndex < len(state.StageResults) {
+		nextStageResult := state.StageResults[nextCompensationStageIndex]
+		envelope.StageToCompensate = nextStageResult.StageID
+
+		// Update serialized original result
+		resultData, err := json.Marshal(nextStageResult)
+		if err != nil {
+			return fmt.Errorf("failed to serialize next stage result: %w", err)
+		}
+		envelope.SerializedOriginalResult = string(resultData)
+	} else {
+		return fmt.Errorf("invalid compensation stage index: %d", nextCompensationStageIndex)
+	}
+
+	// Update envelope timestamp and ID for next message
+	envelope.BaseMessage = contracts.NewBaseMessage("CompensationMessageEnvelope")
+
+	// Publish next compensation message
+	queueName := w.engine.getCompensationQueueName(w.ID)
+	err := w.engine.publisher.Publish(ctx, envelope,
+		messaging.WithExchange(""), // Direct queue delivery
+		messaging.WithRoutingKey(queueName),
+		messaging.WithPersistent(true), // Ensure message persistence
+	)
+	if err != nil {
+		return fmt.Errorf("failed to publish next compensation message: %w", err)
+	}
+
+	w.engine.logger.Info("published next compensation message",
+		"workflowId", envelope.WorkflowID,
+		"instanceId", envelope.InstanceID,
+		"nextStage", envelope.StageToCompensate,
+		"compensationIndex", envelope.CompensationIndex)
+
+	return nil
+}
+
+// compensateStages runs compensation logic for all completed stages in reverse order (legacy sync method)
 func (w *Workflow) compensateStages(ctx context.Context, state *WorkflowState) {
 	w.engine.logger.Info("starting compensation", "workflowId", state.WorkflowID, "instanceId", state.InstanceID)
 

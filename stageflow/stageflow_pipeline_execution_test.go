@@ -24,7 +24,9 @@ func createTestEngineForPipeline() *StageFlowEngine {
 	// Setup default mocks
 	publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
 	transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil).Maybe()
-	subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil).Maybe()
+	subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
+	subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "CompensationMessageEnvelope", mock.Anything, mock.Anything).Return(nil).Maybe()
+	subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "CompensationMessageEnvelope", mock.Anything, mock.Anything).Return(nil).Maybe()
 	
 	engine := NewStageFlowEngine(publisher, subscriber, transport)
 	return engine
@@ -39,6 +41,7 @@ func executeWorkflowSynchronously(t *testing.T, workflow *Workflow, initialData 
 	publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil)
 	subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
+	subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "CompensationMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
 	
 	engine := NewStageFlowEngine(publisher, subscriber, transport)
 	engine.SetServiceQueue("test-queue")
@@ -200,6 +203,7 @@ func TestSequentialPipelineExecution(t *testing.T) {
 		publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil)
 		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
+	subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "CompensationMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
 		
 		engine := NewStageFlowEngine(publisher, subscriber, transport)
 		engine.SetServiceQueue("test-queue")
@@ -267,6 +271,7 @@ func TestSequentialPipelineExecution(t *testing.T) {
 		publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil)
 		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
+	subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "CompensationMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
 		
 		engine := NewStageFlowEngine(publisher, subscriber, transport)
 		engine.SetServiceQueue("test-queue")

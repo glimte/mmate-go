@@ -49,6 +49,7 @@ func TestWorkflowCompletionEvents(t *testing.T) {
 		publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil)
 		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
+		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "CompensationMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
 		
 		// Create engine with completion events enabled
 		engine := NewStageFlowEngine(publisher, subscriber, transport, 
@@ -131,6 +132,7 @@ func TestWorkflowCompletionEvents(t *testing.T) {
 		publisher.On("PublishEvent", mock.Anything, mock.AnythingOfType("*stageflow.WorkflowFailedEvent"), mock.Anything).Return(nil)
 		transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil)
 		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
+		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "CompensationMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
 		
 		// Create engine with completion events enabled
 		engine := NewStageFlowEngine(publisher, subscriber, transport, 
@@ -202,6 +204,7 @@ func TestWorkflowCompletionEvents(t *testing.T) {
 		publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil)
 		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
+		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "CompensationMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
 		
 		// Create engine with completion events enabled
 		engine := NewStageFlowEngine(publisher, subscriber, transport, 
@@ -279,6 +282,7 @@ func TestWorkflowCompletionEvents(t *testing.T) {
 		publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil)
 		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
+		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "CompensationMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
 		
 		// Create engine with completion events disabled (default)
 		engine := NewStageFlowEngine(publisher, subscriber, transport)

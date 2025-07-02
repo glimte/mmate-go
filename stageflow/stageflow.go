@@ -152,6 +152,8 @@ type StageFlowEngine struct {
 	logger            *slog.Logger
 	contractExtractor messaging.ContractExtractor
 	stageHandlers     map[string]func(context.Context, *FlowMessageEnvelope) error
+	enableCompletionEvents bool
+	completionEventOptions []messaging.PublishOption
 }
 
 // EngineOption configures the stage flow engine
@@ -163,6 +165,8 @@ type EngineConfig struct {
 	Logger     *slog.Logger
 	StageQueuePrefix string
 	MaxStageConcurrency int
+	EnableCompletionEvents bool
+	CompletionEventOptions []messaging.PublishOption
 }
 
 // WithStateStore sets the state store for workflow persistence
@@ -193,6 +197,14 @@ func WithMaxStageConcurrency(max int) EngineOption {
 	}
 }
 
+// WithCompletionEvents enables publishing of workflow completion events
+func WithCompletionEvents(enabled bool, options ...messaging.PublishOption) EngineOption {
+	return func(c *EngineConfig) {
+		c.EnableCompletionEvents = enabled
+		c.CompletionEventOptions = options
+	}
+}
+
 // NewStageFlowEngine creates a new stage flow engine
 func NewStageFlowEngine(publisher messaging.Publisher, subscriber messaging.Subscriber, transport messaging.Transport, opts ...EngineOption) *StageFlowEngine {
 	config := &EngineConfig{
@@ -216,10 +228,15 @@ func NewStageFlowEngine(publisher messaging.Publisher, subscriber messaging.Subs
 		maxConcurrency: config.MaxStageConcurrency,
 		logger:     config.Logger,
 		stageHandlers: make(map[string]func(context.Context, *FlowMessageEnvelope) error),
+		enableCompletionEvents: config.EnableCompletionEvents,
+		completionEventOptions: config.CompletionEventOptions,
 	}
 
-	// Register message type for flow envelopes
+	// Register message types
 	messaging.Register("FlowMessageEnvelope", func() contracts.Message { return &FlowMessageEnvelope{} })
+	messaging.Register("WorkflowCompletedEvent", func() contracts.Message { return &WorkflowCompletedEvent{} })
+	messaging.Register("WorkflowFailedEvent", func() contracts.Message { return &WorkflowFailedEvent{} })
+	messaging.Register("StageCompletedEvent", func() contracts.Message { return &StageCompletedEvent{} })
 
 	return engine
 }
@@ -242,7 +259,19 @@ func (w *Workflow) proceedToNextStage(ctx context.Context, envelope *FlowMessage
 			"instanceId", envelope.InstanceID,
 			"duration", endTime.Sub(state.StartTime))
 		
-		// TODO: Publish completion event if needed
+		// Publish completion event if enabled
+		if w.engine.enableCompletionEvents {
+			event := NewWorkflowCompletedEvent(w, state)
+			options := append([]messaging.PublishOption{messaging.WithPersistent(true)}, w.engine.completionEventOptions...)
+			if err := w.engine.publisher.PublishEvent(ctx, event, options...); err != nil {
+				w.engine.logger.Error("failed to publish workflow completion event",
+					"error", err,
+					"workflowId", envelope.WorkflowID,
+					"instanceId", envelope.InstanceID)
+				// Don't fail the workflow if event publishing fails
+			}
+		}
+		
 		return nil
 	}
 	
@@ -688,6 +717,18 @@ func (w *Workflow) processStageMessage(ctx context.Context, envelope *FlowMessag
 			state.LastModified = time.Now()
 			state.Version++
 
+			// Publish workflow failed event if enabled
+			if w.engine.enableCompletionEvents {
+				event := NewWorkflowFailedEvent(w, &state, execErr, envelope.CurrentStageIndex)
+				options := append([]messaging.PublishOption{messaging.WithPersistent(true)}, w.engine.completionEventOptions...)
+				if err := w.engine.publisher.PublishEvent(ctx, event, options...); err != nil {
+					w.engine.logger.Error("failed to publish workflow failed event",
+						"error", err,
+						"workflowId", envelope.WorkflowID,
+						"instanceId", envelope.InstanceID)
+				}
+			}
+
 			// TODO: Implement compensation via queue messages
 			return fmt.Errorf("required stage %s failed: %w", stage.ID, execErr)
 		}
@@ -732,6 +773,20 @@ func (w *Workflow) processStageMessage(ctx context.Context, envelope *FlowMessag
 	// Add result to state
 	w.addStageResult(&state, result)
 	state.CurrentStage = ""
+
+	// Publish stage completion event if enabled
+	if w.engine.enableCompletionEvents && result.Status == StageCompleted {
+		event := NewStageCompletedEvent(w, &state, stage, envelope.CurrentStageIndex, result)
+		options := append([]messaging.PublishOption{messaging.WithPersistent(true)}, w.engine.completionEventOptions...)
+		if err := w.engine.publisher.PublishEvent(ctx, event, options...); err != nil {
+			w.engine.logger.Error("failed to publish stage completion event",
+				"error", err,
+				"stageId", stage.ID,
+				"workflowId", envelope.WorkflowID,
+				"instanceId", envelope.InstanceID)
+			// Don't fail the stage if event publishing fails
+		}
+	}
 
 	// Proceed to next stage or complete workflow
 	return w.proceedToNextStage(ctx, envelope, &state)

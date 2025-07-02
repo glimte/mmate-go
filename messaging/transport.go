@@ -16,6 +16,26 @@ type TransportPublisher interface {
 	Close() error
 }
 
+// TransactionalTransportPublisher extends TransportPublisher with transaction support
+type TransactionalTransportPublisher interface {
+	TransportPublisher
+	
+	// BeginTx begins a new transaction
+	BeginTx(ctx context.Context) (TransportTransaction, error)
+}
+
+// TransportTransaction represents a transport-level transaction
+type TransportTransaction interface {
+	// Publish publishes a message within the transaction
+	Publish(ctx context.Context, exchange, routingKey string, envelope *contracts.Envelope) error
+	
+	// Commit commits the transaction
+	Commit() error
+	
+	// Rollback rolls back the transaction
+	Rollback() error
+}
+
 // TransportSubscriber defines the interface for subscribing to messages through a transport
 type TransportSubscriber interface {
 	// Subscribe registers a handler for messages on a specific queue

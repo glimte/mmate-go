@@ -422,6 +422,61 @@ func (c *Client) PublishReply(ctx context.Context, reply contracts.Reply, replyT
 	return c.publisher.PublishReply(ctx, reply, replyTo, options...)
 }
 
+// ScheduleCommand schedules a command to be delivered at a specific time
+// This is a convenience method that delegates to the publisher
+func (c *Client) ScheduleCommand(ctx context.Context, cmd contracts.Command, scheduledFor time.Time, options ...messaging.PublishOption) error {
+	if c.publisher == nil {
+		return fmt.Errorf("publisher not initialized")
+	}
+	return c.publisher.ScheduleCommand(ctx, cmd, scheduledFor, options...)
+}
+
+// ScheduleEvent schedules an event to be delivered at a specific time
+// This is a convenience method that delegates to the publisher
+func (c *Client) ScheduleEvent(ctx context.Context, evt contracts.Event, scheduledFor time.Time, options ...messaging.PublishOption) error {
+	if c.publisher == nil {
+		return fmt.Errorf("publisher not initialized")
+	}
+	return c.publisher.ScheduleEvent(ctx, evt, scheduledFor, options...)
+}
+
+// ScheduleQuery schedules a query to be delivered at a specific time
+// This is a convenience method that delegates to the publisher
+func (c *Client) ScheduleQuery(ctx context.Context, query contracts.Query, scheduledFor time.Time, options ...messaging.PublishOption) error {
+	if c.publisher == nil {
+		return fmt.Errorf("publisher not initialized")
+	}
+	return c.publisher.ScheduleQuery(ctx, query, scheduledFor, options...)
+}
+
+// PublishWithDelay publishes a message with a delay
+// This is a convenience method that uses the WithDelay option
+func (c *Client) PublishWithDelay(ctx context.Context, msg contracts.Message, delay time.Duration, options ...messaging.PublishOption) error {
+	if c.publisher == nil {
+		return fmt.Errorf("publisher not initialized")
+	}
+	opts := append([]messaging.PublishOption{messaging.WithDelay(delay)}, options...)
+	return c.publisher.Publish(ctx, msg, opts...)
+}
+
+// NewBatch creates a new batch for batch publishing
+// Messages can be added to the batch and published together
+func (c *Client) NewBatch() *messaging.Batch {
+	if c.publisher == nil {
+		return nil
+	}
+	return c.publisher.NewBatch()
+}
+
+// BeginTx begins a new transaction for transactional publishing
+// All messages published within the transaction are committed or rolled back together
+func (c *Client) BeginTx() (*messaging.Transaction, error) {
+	if c.publisher == nil {
+		return nil, fmt.Errorf("publisher not initialized")
+	}
+	return c.publisher.BeginTx()
+}
+
 // NewStageFlowEngine creates a new StageFlow engine with contract extraction if enabled
 func (c *Client) NewStageFlowEngine(opts ...stageflow.EngineOption) *stageflow.StageFlowEngine {
 	engine := stageflow.NewStageFlowEngine(c.publisher, c.subscriber, opts...)

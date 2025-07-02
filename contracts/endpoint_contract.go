@@ -2,7 +2,11 @@ package contracts
 
 import (
 	"encoding/json"
+	"regexp"
+	"strings"
 	"time"
+	
+	"github.com/Masterminds/semver/v3"
 )
 
 // EndpointContract defines a discoverable service endpoint
@@ -78,18 +82,9 @@ func (c *EndpointContract) IsValid() bool {
 
 // Matches checks if contract matches a pattern and version
 func (c *EndpointContract) Matches(pattern string, version string) bool {
-	// Simple pattern matching for now
-	// TODO: Implement proper pattern matching (e.g., "order.*")
-	if pattern != "" && pattern != c.EndpointID {
-		// Check if pattern ends with * for wildcard matching
-		if len(pattern) > 1 && pattern[len(pattern)-1] == '*' {
-			prefix := pattern[:len(pattern)-1]
-			if len(c.EndpointID) < len(prefix) || c.EndpointID[:len(prefix)] != prefix {
-				return false
-			}
-		} else {
-			return false
-		}
+	// Pattern matching
+	if pattern != "" && !c.matchesPattern(pattern) {
+		return false
 	}
 	
 	// Version matching
@@ -100,9 +95,70 @@ func (c *EndpointContract) Matches(pattern string, version string) bool {
 	return true
 }
 
+// matchesPattern checks if endpoint ID matches the given pattern
+func (c *EndpointContract) matchesPattern(pattern string) bool {
+	// Empty pattern matches everything
+	if pattern == "" {
+		return true
+	}
+	
+	// Exact match
+	if pattern == c.EndpointID {
+		return true
+	}
+	
+	// No wildcards means exact match required
+	if !strings.Contains(pattern, "*") {
+		return false
+	}
+	
+	// Convert pattern to regex
+	// Escape special regex characters except *
+	regexPattern := regexp.QuoteMeta(pattern)
+	// Replace escaped \* with regex .*
+	regexPattern = strings.ReplaceAll(regexPattern, "\\*", ".*")
+	// Anchor to match entire string
+	regexPattern = "^" + regexPattern + "$"
+	
+	matched, err := regexp.MatchString(regexPattern, c.EndpointID)
+	return err == nil && matched
+}
+
 // matchesVersion checks if contract version matches requested version
 func (c *EndpointContract) matchesVersion(requestedVersion string) bool {
-	// Simple version matching for now
-	// TODO: Implement semantic version matching (e.g., "1.x", "^1.0.0")
-	return c.Version == requestedVersion || requestedVersion == ""
+	// Empty version matches any version
+	if requestedVersion == "" {
+		return true
+	}
+	
+	// Try exact match first
+	if c.Version == requestedVersion {
+		return true
+	}
+	
+	// Handle simple wildcards like "1.x" or "2.x.x"
+	if strings.Contains(requestedVersion, "x") {
+		pattern := strings.ReplaceAll(requestedVersion, "x", "[0-9]+")
+		pattern = strings.ReplaceAll(pattern, ".", "\\.")
+		pattern = "^" + pattern + "$"
+		matched, err := regexp.MatchString(pattern, c.Version)
+		if err == nil && matched {
+			return true
+		}
+	}
+	
+	// Try semantic version constraint matching
+	constraint, err := semver.NewConstraint(requestedVersion)
+	if err != nil {
+		// If it's not a valid constraint, fall back to exact match
+		return false
+	}
+	
+	version, err := semver.NewVersion(c.Version)
+	if err != nil {
+		// If contract version is not valid semver, can't match
+		return false
+	}
+	
+	return constraint.Check(version)
 }

@@ -34,6 +34,15 @@ func (e *TestEvent) GetSequence() int64 {
 	return e.Sequence
 }
 
+type TestQuery struct {
+	contracts.BaseQuery
+	Filter string `json:"filter"`
+}
+
+func (q *TestQuery) GetReplyTo() string {
+	return ""
+}
+
 // Mock handler
 type mockHandler struct {
 	mock.Mock

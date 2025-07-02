@@ -142,12 +142,16 @@ type Workflow struct {
 type StageFlowEngine struct {
 	publisher         messaging.Publisher
 	subscriber        messaging.Subscriber
+	transport         messaging.Transport
 	stateStore        StateStore
 	workflows         map[string]*Workflow
 	serviceQueue      string
+	stageQueuePrefix  string
+	maxConcurrency    int
 	mu                sync.RWMutex
 	logger            *slog.Logger
 	contractExtractor messaging.ContractExtractor
+	stageHandlers     map[string]func(context.Context, *FlowMessageEnvelope) error
 }
 
 // EngineOption configures the stage flow engine
@@ -157,6 +161,8 @@ type EngineOption func(*EngineConfig)
 type EngineConfig struct {
 	StateStore StateStore
 	Logger     *slog.Logger
+	StageQueuePrefix string
+	MaxStageConcurrency int
 }
 
 // WithStateStore sets the state store for workflow persistence
@@ -173,11 +179,27 @@ func WithStageFlowLogger(logger *slog.Logger) EngineOption {
 	}
 }
 
+// WithStageQueuePrefix sets the prefix for stage queue names
+func WithStageQueuePrefix(prefix string) EngineOption {
+	return func(c *EngineConfig) {
+		c.StageQueuePrefix = prefix
+	}
+}
+
+// WithMaxStageConcurrency sets the max concurrent messages per stage
+func WithMaxStageConcurrency(max int) EngineOption {
+	return func(c *EngineConfig) {
+		c.MaxStageConcurrency = max
+	}
+}
+
 // NewStageFlowEngine creates a new stage flow engine
-func NewStageFlowEngine(publisher messaging.Publisher, subscriber messaging.Subscriber, opts ...EngineOption) *StageFlowEngine {
+func NewStageFlowEngine(publisher messaging.Publisher, subscriber messaging.Subscriber, transport messaging.Transport, opts ...EngineOption) *StageFlowEngine {
 	config := &EngineConfig{
 		StateStore: NewQueueBasedStateStore(), // Use queue-based state store
 		Logger:     slog.Default(),
+		StageQueuePrefix: "stageflow.",
+		MaxStageConcurrency: 10,
 	}
 
 	for _, opt := range opts {
@@ -187,9 +209,13 @@ func NewStageFlowEngine(publisher messaging.Publisher, subscriber messaging.Subs
 	engine := &StageFlowEngine{
 		publisher:  publisher,
 		subscriber: subscriber,
+		transport:  transport,
 		stateStore: config.StateStore,
 		workflows:  make(map[string]*Workflow),
+		stageQueuePrefix: config.StageQueuePrefix,
+		maxConcurrency: config.MaxStageConcurrency,
 		logger:     config.Logger,
+		stageHandlers: make(map[string]func(context.Context, *FlowMessageEnvelope) error),
 	}
 
 	// Register message type for flow envelopes
@@ -243,6 +269,8 @@ func (w *Workflow) ProcessStageMessage(ctx context.Context, envelope *FlowMessag
 
 // RegisterWorkflow registers a workflow with the engine
 func (e *StageFlowEngine) RegisterWorkflow(workflow *Workflow) error {
+	ctx := context.Background()
+	
 	if workflow == nil {
 		return fmt.Errorf("workflow cannot be nil")
 	}
@@ -251,6 +279,16 @@ func (e *StageFlowEngine) RegisterWorkflow(workflow *Workflow) error {
 	}
 
 	workflow.engine = e
+
+	// Create stage queues
+	if err := e.createStageQueues(ctx, workflow); err != nil {
+		return fmt.Errorf("failed to create stage queues: %w", err)
+	}
+	
+	// Subscribe to stage queues
+	if err := e.subscribeToStageQueues(ctx, workflow); err != nil {
+		return fmt.Errorf("failed to subscribe to stage queues: %w", err)
+	}
 
 	e.mu.Lock()
 	e.workflows[workflow.ID] = workflow
@@ -262,7 +300,6 @@ func (e *StageFlowEngine) RegisterWorkflow(workflow *Workflow) error {
 	// For now, we pass nil as input type since workflows don't have explicit input message types
 	// In the future, we could enhance workflows to declare their trigger message type
 	if e.contractExtractor != nil {
-		ctx := context.Background()
 		if err := e.contractExtractor.ExtractFromWorkflow(ctx, workflow.ID, workflow.Name, nil); err != nil {
 			e.logger.Warn("failed to extract workflow contract", "error", err, "workflowId", workflow.ID)
 		}
@@ -295,6 +332,76 @@ func (e *StageFlowEngine) SetContractExtractor(extractor messaging.ContractExtra
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.contractExtractor = extractor
+}
+
+// getStageQueueName returns the queue name for a specific stage
+func (e *StageFlowEngine) getStageQueueName(workflowID string, stageIndex int) string {
+	return fmt.Sprintf("%s%s.stage%d", e.stageQueuePrefix, workflowID, stageIndex)
+}
+
+// createStageQueues creates all queues for a workflow
+func (e *StageFlowEngine) createStageQueues(ctx context.Context, workflow *Workflow) error {
+	for i := range workflow.Stages {
+		queueName := e.getStageQueueName(workflow.ID, i)
+		
+		// Create queue with DLQ settings
+		queueOptions := messaging.QueueOptions{
+			Durable:     true,
+			AutoDelete:  false,
+			Args: map[string]interface{}{
+				"x-message-ttl": int32(3600000), // 1 hour TTL
+				"x-dead-letter-exchange": "",
+				"x-dead-letter-routing-key": fmt.Sprintf("dlq.%s", queueName),
+			},
+		}
+		
+		if err := e.transport.CreateQueue(ctx, queueName, queueOptions); err != nil {
+			return fmt.Errorf("failed to create queue %s: %w", queueName, err)
+		}
+		
+		e.logger.Info("created stage queue", "queue", queueName, "workflow", workflow.ID, "stage", i)
+	}
+	
+	return nil
+}
+
+// subscribeToStageQueues subscribes to all stage queues for a workflow
+func (e *StageFlowEngine) subscribeToStageQueues(ctx context.Context, workflow *Workflow) error {
+	for i, stage := range workflow.Stages {
+		queueName := e.getStageQueueName(workflow.ID, i)
+		stageIndex := i
+		currentStage := stage
+		
+		// Create handler for this stage
+		handler := func(ctx context.Context, envelope *FlowMessageEnvelope) error {
+			envelope.CurrentStageIndex = stageIndex
+			envelope.StageName = currentStage.ID
+			return workflow.processStageMessage(ctx, envelope)
+		}
+		
+		// Store handler
+		e.stageHandlers[queueName] = handler
+		
+		// Subscribe to queue
+		messageHandler := messaging.MessageHandlerFunc(func(ctx context.Context, msg contracts.Message) error {
+			envelope, ok := msg.(*FlowMessageEnvelope)
+			if !ok {
+				return fmt.Errorf("expected FlowMessageEnvelope, got %T", msg)
+			}
+			return handler(ctx, envelope)
+		})
+		
+		// Subscribe with prefetch for concurrency control
+		if err := e.subscriber.Subscribe(ctx, queueName, "FlowMessageEnvelope", 
+			messageHandler, 
+			messaging.WithPrefetchCount(e.maxConcurrency)); err != nil {
+			return fmt.Errorf("failed to subscribe to queue %s: %w", queueName, err)
+		}
+		
+		e.logger.Info("subscribed to stage queue", "queue", queueName, "workflow", workflow.ID, "stage", i)
+	}
+	
+	return nil
 }
 
 // ExecuteWorkflow starts execution of a workflow
@@ -442,7 +549,7 @@ func (w *Workflow) Execute(ctx context.Context, initialData map[string]interface
 	return state, nil
 }
 
-// publishToStage publishes a message to the service queue with state embedded
+// publishToStage publishes a message to the specific stage queue with state embedded
 func (w *Workflow) publishToStage(ctx context.Context, stageIndex int, state *WorkflowState, payload interface{}) error {
 	if stageIndex >= len(w.Stages) {
 		return fmt.Errorf("stage index %d out of bounds", stageIndex)
@@ -476,23 +583,25 @@ func (w *Workflow) publishToStage(ctx context.Context, stageIndex int, state *Wo
 	envelope.InstanceID = state.InstanceID
 	envelope.StageName = stage.ID
 
-	// Set next stage info if not last stage
+	// Set next stage queue if not last stage
 	if stageIndex+1 < len(w.Stages) {
-		nextStage := w.Stages[stageIndex+1]
-		envelope.NextStageQueue = nextStage.ID // Just the stage name
+		envelope.NextStageQueue = w.engine.getStageQueueName(w.ID, stageIndex+1)
 	}
 
-	w.engine.logger.Info("publishing stage message to service queue",
+	// Get the queue name for this stage
+	queueName := w.engine.getStageQueueName(w.ID, stageIndex)
+
+	w.engine.logger.Info("publishing message to stage queue",
 		"workflowId", w.ID,
 		"instanceId", state.InstanceID,
 		"stageId", stage.ID,
 		"stageIndex", stageIndex,
-		"serviceQueue", w.engine.serviceQueue)
+		"queue", queueName)
 
-	// Publish to service queue (same queue where commands are received)
+	// Publish to specific stage queue
 	return w.engine.publisher.Publish(ctx, envelope,
 		messaging.WithExchange(""), // Direct queue delivery
-		messaging.WithRoutingKey(w.engine.serviceQueue),
+		messaging.WithRoutingKey(queueName),
 		messaging.WithPersistent(true), // Ensure message persistence
 	)
 }

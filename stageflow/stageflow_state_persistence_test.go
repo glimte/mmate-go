@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -474,22 +473,18 @@ func TestStateStorePerformance(t *testing.T) {
 }
 
 // Helper function to create test engine with mock store
-func createTestEngine(store StateStore) *StageFlowEngine {
+func createTestEngineWithStateStore(store StateStore) *StageFlowEngine {
 	// Create mock publisher and subscriber for tests
 	publisher := &mockPublisher{}
 	subscriber := &mockSubscriber{}
+	transport := &mockTransport{}
 	
 	// Setup mock expectations
-	publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
-	subscriber.On("Subscribe", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+	subscriber.On("Subscribe", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+	transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil).Maybe()
 	
-	return &StageFlowEngine{
-		publisher:  publisher,
-		subscriber: subscriber,
-		stateStore: store,
-		workflows:  make(map[string]*Workflow),
-		logger:     slog.Default(),
-	}
+	return NewStageFlowEngine(publisher, subscriber, transport, WithStateStore(store))
 }
 
 // Benchmark tests

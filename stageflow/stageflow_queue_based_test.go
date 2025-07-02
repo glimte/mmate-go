@@ -93,11 +93,14 @@ func TestQueueBasedStageFlowExecution(t *testing.T) {
 	t.Run("Execute publishes to first stage and returns running state", func(t *testing.T) {
 		publisher := &mockQueuePublisher{}
 		subscriber := &mockQueueSubscriber{}
+		transport := &mockTransport{}
 		
 		// Mock successful publish
 		publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil)
+		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
 		
-		engine := NewStageFlowEngine(publisher, subscriber)
+		engine := NewStageFlowEngine(publisher, subscriber, transport)
 		engine.SetServiceQueue("test-queue")
 		
 		// Create workflow with test stages
@@ -149,7 +152,11 @@ func TestQueueBasedStageFlowExecution(t *testing.T) {
 		
 		publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		
-		engine := NewStageFlowEngine(publisher, subscriber)
+		transport := &mockTransport{}
+		transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil)
+		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
+		
+		engine := NewStageFlowEngine(publisher, subscriber, transport)
 		engine.SetServiceQueue("test-queue")
 		
 		// Create workflow with multiple stages
@@ -219,7 +226,11 @@ func TestQueueBasedStageFlowExecution(t *testing.T) {
 		
 		publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		
-		engine := NewStageFlowEngine(publisher, subscriber)
+		transport := &mockTransport{}
+		transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil)
+		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
+		
+		engine := NewStageFlowEngine(publisher, subscriber, transport)
 		engine.SetServiceQueue("test-queue")
 		
 		// Create workflow with single stage
@@ -271,7 +282,11 @@ func TestQueueBasedStageFlowExecution(t *testing.T) {
 		publisher := &mockQueuePublisher{}
 		subscriber := &mockQueueSubscriber{}
 		
-		engine := NewStageFlowEngine(publisher, subscriber)
+		transport := &mockTransport{}
+		transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil)
+		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
+		
+		engine := NewStageFlowEngine(publisher, subscriber, transport)
 		engine.SetServiceQueue("test-queue")
 		
 		// Create stage that fails
@@ -329,7 +344,11 @@ func TestQueueBasedStageFlowExecution(t *testing.T) {
 		
 		publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		
-		engine := NewStageFlowEngine(publisher, subscriber)
+		transport := &mockTransport{}
+		transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil)
+		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
+		
+		engine := NewStageFlowEngine(publisher, subscriber, transport)
 		engine.SetServiceQueue("test-queue")
 		
 		// Create handler that modifies state
@@ -470,7 +489,11 @@ func TestQueueBasedWorkflowIntegration(t *testing.T) {
 		
 		publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		
-		engine := NewStageFlowEngine(publisher, subscriber)
+		transport := &mockTransport{}
+		transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil)
+		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
+		
+		engine := NewStageFlowEngine(publisher, subscriber, transport)
 		engine.SetServiceQueue("integration-test-queue")
 		
 		// Track execution order

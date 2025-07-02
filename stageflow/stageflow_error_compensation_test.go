@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -17,7 +16,7 @@ import (
 // Test error handling in stage execution
 func TestStageErrorHandling(t *testing.T) {
 	t.Run("Queue-based workflow execution publishes to first stage", func(t *testing.T) {
-		engine := createTestEngineWithStore()
+		engine := createTestEngineForErrorCompensation()
 		workflow := NewWorkflow("test-workflow", "Test Workflow")
 
 		// Stage 1 succeeds
@@ -56,7 +55,7 @@ func TestStageErrorHandling(t *testing.T) {
 	})
 
 	t.Run("Optional stage failure - workflow starts correctly", func(t *testing.T) {
-		engine := createTestEngineWithStore()
+		engine := createTestEngineForErrorCompensation()
 		workflow := NewWorkflow("test-workflow", "Test Workflow")
 
 		// Stage 1 succeeds
@@ -91,7 +90,7 @@ func TestStageErrorHandling(t *testing.T) {
 	})
 
 	t.Run("Stage timeout handling - workflow starts correctly", func(t *testing.T) {
-		engine := createTestEngineWithStore()
+		engine := createTestEngineForErrorCompensation()
 		workflow := NewWorkflow("test-workflow", "Test Workflow")
 
 		// Add stage with short timeout
@@ -119,7 +118,7 @@ func TestStageErrorHandling(t *testing.T) {
 	})
 
 	t.Run("Context cancellation - workflow starts correctly", func(t *testing.T) {
-		engine := createTestEngineWithStore()
+		engine := createTestEngineForErrorCompensation()
 		workflow := NewWorkflow("test-workflow", "Test Workflow")
 
 		// Stage 1 executes quickly
@@ -151,7 +150,7 @@ func TestStageErrorHandling(t *testing.T) {
 // Test compensation logic
 func TestCompensation(t *testing.T) {
 	t.Run("Basic compensation setup - workflow starts correctly", func(t *testing.T) {
-		engine := createTestEngineWithStore()
+		engine := createTestEngineForErrorCompensation()
 		workflow := NewWorkflow("test-workflow", "Test Workflow")
 
 		// Stage 1 with compensation
@@ -195,7 +194,7 @@ func TestCompensation(t *testing.T) {
 	})
 
 	t.Run("Compensation with original result data - workflow starts correctly", func(t *testing.T) {
-		engine := createTestEngineWithStore()
+		engine := createTestEngineForErrorCompensation()
 		workflow := NewWorkflow("test-workflow", "Test Workflow")
 
 		// Stage with data
@@ -230,7 +229,7 @@ func TestCompensation(t *testing.T) {
 	})
 
 	t.Run("Compensation failure handling - workflow starts correctly", func(t *testing.T) {
-		engine := createTestEngineWithStore()
+		engine := createTestEngineForErrorCompensation()
 		workflow := NewWorkflow("test-workflow", "Test Workflow")
 
 		// Stage 1 succeeds
@@ -259,7 +258,7 @@ func TestCompensation(t *testing.T) {
 	})
 
 	t.Run("No compensation for skipped stages - workflow starts correctly", func(t *testing.T) {
-		engine := createTestEngineWithStore()
+		engine := createTestEngineForErrorCompensation()
 		workflow := NewWorkflow("test-workflow", "Test Workflow")
 
 		// Optional stage that will be skipped due to dependency
@@ -294,7 +293,7 @@ func TestCompensation(t *testing.T) {
 // Test retry policies
 func TestStageRetryPolicies(t *testing.T) {
 	t.Run("Stage with retry policy - workflow starts correctly", func(t *testing.T) {
-		engine := createTestEngineWithStore()
+		engine := createTestEngineForErrorCompensation()
 		workflow := NewWorkflow("test-workflow", "Test Workflow")
 
 		maxAttempts := 3
@@ -318,7 +317,7 @@ func TestStageRetryPolicies(t *testing.T) {
 	})
 
 	t.Run("Retry policy exhaustion - workflow starts correctly", func(t *testing.T) {
-		engine := createTestEngineWithStore()
+		engine := createTestEngineForErrorCompensation()
 		workflow := NewWorkflow("test-workflow", "Test Workflow")
 
 		// Add stage that always fails
@@ -340,7 +339,7 @@ func TestStageRetryPolicies(t *testing.T) {
 	})
 
 	t.Run("Retry with exponential backoff - workflow starts correctly", func(t *testing.T) {
-		engine := createTestEngineWithStore()
+		engine := createTestEngineForErrorCompensation()
 		workflow := NewWorkflow("test-workflow", "Test Workflow")
 
 		// Add stage with exponential backoff
@@ -370,7 +369,7 @@ func TestStageRetryPolicies(t *testing.T) {
 // Test error propagation and workflow status
 func TestErrorPropagationAndStatus(t *testing.T) {
 	t.Run("Error message propagation - workflow starts correctly", func(t *testing.T) {
-		engine := createTestEngineWithStore()
+		engine := createTestEngineForErrorCompensation()
 		workflow := NewWorkflow("test-workflow", "Test Workflow")
 
 		errorMsg := "detailed error: database connection failed"
@@ -388,7 +387,7 @@ func TestErrorPropagationAndStatus(t *testing.T) {
 	})
 
 	t.Run("Multiple stage failures setup - workflow starts correctly", func(t *testing.T) {
-		engine := createTestEngineWithStore()
+		engine := createTestEngineForErrorCompensation()
 		workflow := NewWorkflow("test-workflow", "Test Workflow")
 
 		// Stage 1 fails (optional)
@@ -428,7 +427,7 @@ func TestErrorPropagationAndStatus(t *testing.T) {
 // Test concurrent error scenarios
 func TestConcurrentErrorHandling(t *testing.T) {
 	t.Run("Multiple workflows with failures - workflows start correctly", func(t *testing.T) {
-		engine := createTestEngineWithStore()
+		engine := createTestEngineForErrorCompensation()
 		workflow := NewWorkflow("test-workflow", "Test Workflow")
 
 		// Add stages that fail randomly
@@ -481,29 +480,26 @@ func TestConcurrentErrorHandling(t *testing.T) {
 	})
 }
 
-// Helper to create test engine with in-memory store
-func createTestEngineWithStore() *StageFlowEngine {
+// Helper to create test engine with in-memory store for error compensation tests
+func createTestEngineForErrorCompensation() *StageFlowEngine {
 	store := NewInMemoryStateStore()
 	// Create mock publisher and subscriber for testing
 	publisher := &mockPublisher{}
 	subscriber := &mockSubscriber{}
+	transport := &mockTransport{}
 	
 	// Setup mock expectations
-	publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
-	subscriber.On("Subscribe", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+	subscriber.On("Subscribe", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+	transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil).Maybe()
 	
-	return &StageFlowEngine{
-		publisher:  publisher,
-		subscriber: subscriber,
-		stateStore: store,
-		workflows:  make(map[string]*Workflow),
-		logger:     slog.Default(),
-	}
+	engine := NewStageFlowEngine(publisher, subscriber, transport, WithStateStore(store))
+	return engine
 }
 
 // Benchmark error handling and compensation
 func BenchmarkErrorHandlingAndCompensation(b *testing.B) {
-	engine := createTestEngineWithStore()
+	engine := createTestEngineForErrorCompensation()
 	
 	// Create workflow with compensation
 	workflow := NewWorkflow("bench-workflow", "Benchmark Workflow")

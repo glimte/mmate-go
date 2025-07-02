@@ -479,7 +479,7 @@ func (c *Client) BeginTx() (*messaging.Transaction, error) {
 
 // NewStageFlowEngine creates a new StageFlow engine with contract extraction if enabled
 func (c *Client) NewStageFlowEngine(opts ...stageflow.EngineOption) *stageflow.StageFlowEngine {
-	engine := stageflow.NewStageFlowEngine(c.publisher, c.subscriber, opts...)
+	engine := stageflow.NewStageFlowEngine(c.publisher, c.subscriber, c.transport, opts...)
 	
 	// Set contract extractor if contract publishing is enabled
 	if c.contractDiscovery != nil {

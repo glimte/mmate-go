@@ -15,14 +15,32 @@ import (
 	"github.com/stretchr/testify/mock"
 )
 
+// Helper function to create test engine for pipeline execution tests
+func createTestEngineForPipeline() *StageFlowEngine {
+	publisher := &mockQueuePublisher{}
+	subscriber := &mockQueueSubscriber{}
+	transport := &mockTransport{}
+	
+	// Setup default mocks
+	publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+	transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil).Maybe()
+	subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil).Maybe()
+	
+	engine := NewStageFlowEngine(publisher, subscriber, transport)
+	return engine
+}
+
 // Helper function to simulate synchronous queue-based execution for testing
 func executeWorkflowSynchronously(t *testing.T, workflow *Workflow, initialData map[string]interface{}) (*WorkflowState, error) {
 	publisher := &mockQueuePublisher{}
 	subscriber := &mockQueueSubscriber{}
+	transport := &mockTransport{}
 	
 	publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil)
+	subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
 	
-	engine := NewStageFlowEngine(publisher, subscriber)
+	engine := NewStageFlowEngine(publisher, subscriber, transport)
 	engine.SetServiceQueue("test-queue")
 	
 	err := engine.RegisterWorkflow(workflow)
@@ -177,10 +195,13 @@ func TestSequentialPipelineExecution(t *testing.T) {
 	t.Run("Simple sequential pipeline - queue-based execution", func(t *testing.T) {
 		publisher := &mockQueuePublisher{}
 		subscriber := &mockQueueSubscriber{}
+		transport := &mockTransport{}
 		
 		publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil)
+		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
 		
-		engine := NewStageFlowEngine(publisher, subscriber)
+		engine := NewStageFlowEngine(publisher, subscriber, transport)
 		engine.SetServiceQueue("test-queue")
 		
 		workflow := NewWorkflow("sequential-workflow", "Sequential Test")
@@ -241,10 +262,13 @@ func TestSequentialPipelineExecution(t *testing.T) {
 	t.Run("Pipeline with data passing between stages - queue-based execution", func(t *testing.T) {
 		publisher := &mockQueuePublisher{}
 		subscriber := &mockQueueSubscriber{}
+		transport := &mockTransport{}
 		
 		publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil)
+		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
 		
-		engine := NewStageFlowEngine(publisher, subscriber)
+		engine := NewStageFlowEngine(publisher, subscriber, transport)
 		engine.SetServiceQueue("test-queue")
 		
 		workflow := NewWorkflow("data-passing-workflow", "Data Passing Test")
@@ -872,7 +896,7 @@ func TestComplexPipelineScenarios(t *testing.T) {
 // Test edge cases
 func TestPipelineEdgeCases(t *testing.T) {
 	t.Run("Empty workflow executes successfully", func(t *testing.T) {
-		engine := createTestEngineWithStore()
+		engine := createTestEngineForPipeline()
 		workflow := NewWorkflow("empty-workflow", "Empty Test")
 		
 		engine.RegisterWorkflow(workflow)
@@ -914,7 +938,7 @@ func TestPipelineEdgeCases(t *testing.T) {
 	})
 
 	t.Run("Stage handler panic is recovered", func(t *testing.T) {
-		engine := createTestEngineWithStore()
+		engine := createTestEngineForPipeline()
 		workflow := NewWorkflow("panic-workflow", "Panic Test")
 
 		// Stage that panics
@@ -954,7 +978,7 @@ func TestPipelineEdgeCases(t *testing.T) {
 
 // Benchmark pipeline execution
 func BenchmarkPipelineExecution(b *testing.B) {
-	engine := createTestEngineWithStore()
+	engine := createTestEngineForPipeline()
 	
 	// Create workflow with 10 stages
 	workflow := NewWorkflow("bench-workflow", "Benchmark Workflow")

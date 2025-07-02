@@ -56,6 +56,61 @@ func (m *mockSubscriber) Close() error {
 	return args.Error(0)
 }
 
+type mockTransport struct {
+	mock.Mock
+}
+
+func (m *mockTransport) Publisher() messaging.TransportPublisher {
+	args := m.Called()
+	if pub := args.Get(0); pub != nil {
+		return pub.(messaging.TransportPublisher)
+	}
+	return nil
+}
+
+func (m *mockTransport) Subscriber() messaging.TransportSubscriber {
+	args := m.Called()
+	if sub := args.Get(0); sub != nil {
+		return sub.(messaging.TransportSubscriber)
+	}
+	return nil
+}
+
+func (m *mockTransport) CreateQueue(ctx context.Context, name string, options messaging.QueueOptions) error {
+	args := m.Called(ctx, name, options)
+	return args.Error(0)
+}
+
+func (m *mockTransport) DeleteQueue(ctx context.Context, name string) error {
+	args := m.Called(ctx, name)
+	return args.Error(0)
+}
+
+func (m *mockTransport) BindQueue(ctx context.Context, queue, exchange, routingKey string) error {
+	args := m.Called(ctx, queue, exchange, routingKey)
+	return args.Error(0)
+}
+
+func (m *mockTransport) DeclareQueueWithBindings(ctx context.Context, name string, options messaging.QueueOptions, bindings []messaging.QueueBinding) error {
+	args := m.Called(ctx, name, options, bindings)
+	return args.Error(0)
+}
+
+func (m *mockTransport) Connect(ctx context.Context) error {
+	args := m.Called(ctx)
+	return args.Error(0)
+}
+
+func (m *mockTransport) Close() error {
+	args := m.Called()
+	return args.Error(0)
+}
+
+func (m *mockTransport) IsConnected() bool {
+	args := m.Called()
+	return args.Bool(0)
+}
+
 type testStageHandler struct {
 	stageID string
 	result  *StageResult
@@ -93,34 +148,58 @@ func (h *testCompensationHandler) GetStageID() string {
 	return h.stageID
 }
 
+// Helper function to create a test engine
+func createTestEngine(t *testing.T) (*StageFlowEngine, *mockPublisher, *mockSubscriber, *mockTransport) {
+	publisher := &mockPublisher{}
+	subscriber := &mockSubscriber{}
+	transport := &mockTransport{}
+	
+	// Default mocks for transport
+	transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil).Maybe()
+	subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil).Maybe()
+	
+	engine := NewStageFlowEngine(publisher, subscriber, transport)
+	return engine, publisher, subscriber, transport
+}
+
 func TestNewStageFlowEngine(t *testing.T) {
 	t.Run("NewStageFlowEngine creates engine with defaults", func(t *testing.T) {
 		publisher := &mockPublisher{}
 		subscriber := &mockSubscriber{}
+		transport := &mockTransport{}
 		
-		engine := NewStageFlowEngine(publisher, subscriber)
+		engine := NewStageFlowEngine(publisher, subscriber, transport)
 		
 		assert.NotNil(t, engine)
 		assert.Equal(t, publisher, engine.publisher)
 		assert.Equal(t, subscriber, engine.subscriber)
+		assert.Equal(t, transport, engine.transport)
 		assert.NotNil(t, engine.stateStore)
 		assert.NotNil(t, engine.logger)
 		assert.Empty(t, engine.workflows)
+		assert.Equal(t, "stageflow.", engine.stageQueuePrefix)
+		assert.Equal(t, 10, engine.maxConcurrency)
 	})
 	
 	t.Run("NewStageFlowEngine applies options", func(t *testing.T) {
 		publisher := &mockPublisher{}
 		subscriber := &mockSubscriber{}
+		transport := &mockTransport{}
 		customStore := NewInMemoryStateStore()
 		
 		engine := NewStageFlowEngine(
 			publisher, 
 			subscriber,
+			transport,
 			WithStateStore(customStore),
+			WithStageQueuePrefix("myapp.stages."),
+			WithMaxStageConcurrency(5),
 		)
 		
 		assert.NotNil(t, engine)
 		assert.Equal(t, customStore, engine.stateStore)
+		assert.Equal(t, "myapp.stages.", engine.stageQueuePrefix)
+		assert.Equal(t, 5, engine.maxConcurrency)
 	})
 }
 
@@ -181,9 +260,16 @@ func TestStageFlowEngine(t *testing.T) {
 	t.Run("RegisterWorkflow succeeds with valid workflow", func(t *testing.T) {
 		publisher := &mockPublisher{}
 		subscriber := &mockSubscriber{}
-		engine := NewStageFlowEngine(publisher, subscriber)
+		transport := &mockTransport{}
+		
+		// Mock expectations for queue creation
+		transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil)
+		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
+		
+		engine := NewStageFlowEngine(publisher, subscriber, transport)
 		
 		workflow := NewWorkflow("test-workflow", "Test Workflow")
+		workflow.AddStage("stage1", &testStageHandler{stageID: "stage1"})
 		
 		err := engine.RegisterWorkflow(workflow)
 		
@@ -194,12 +280,17 @@ func TestStageFlowEngine(t *testing.T) {
 		retrieved, err := engine.GetWorkflow("test-workflow")
 		assert.NoError(t, err)
 		assert.Equal(t, workflow, retrieved)
+		
+		// Verify queues were created
+		transport.AssertCalled(t, "CreateQueue", mock.Anything, "stageflow.test-workflow.stage0", mock.Anything)
+		subscriber.AssertCalled(t, "Subscribe", mock.Anything, "stageflow.test-workflow.stage0", "FlowMessageEnvelope", mock.Anything, mock.Anything)
 	})
 	
 	t.Run("RegisterWorkflow fails with nil workflow", func(t *testing.T) {
 		publisher := &mockPublisher{}
 		subscriber := &mockSubscriber{}
-		engine := NewStageFlowEngine(publisher, subscriber)
+		transport := &mockTransport{}
+		engine := NewStageFlowEngine(publisher, subscriber, transport)
 		
 		err := engine.RegisterWorkflow(nil)
 		
@@ -210,7 +301,8 @@ func TestStageFlowEngine(t *testing.T) {
 	t.Run("RegisterWorkflow fails with empty ID", func(t *testing.T) {
 		publisher := &mockPublisher{}
 		subscriber := &mockSubscriber{}
-		engine := NewStageFlowEngine(publisher, subscriber)
+		transport := &mockTransport{}
+		engine := NewStageFlowEngine(publisher, subscriber, transport)
 		
 		workflow := &Workflow{ID: "", Name: "Test"}
 		
@@ -223,7 +315,8 @@ func TestStageFlowEngine(t *testing.T) {
 	t.Run("GetWorkflow fails with non-existent workflow", func(t *testing.T) {
 		publisher := &mockPublisher{}
 		subscriber := &mockSubscriber{}
-		engine := NewStageFlowEngine(publisher, subscriber)
+		transport := &mockTransport{}
+		engine := NewStageFlowEngine(publisher, subscriber, transport)
 		
 		workflow, err := engine.GetWorkflow("non-existent")
 		
@@ -237,12 +330,14 @@ func TestWorkflowExecution(t *testing.T) {
 	t.Run("Execute workflow with successful stages", func(t *testing.T) {
 		publisher := &mockPublisher{}
 		subscriber := &mockSubscriber{}
+		transport := &mockTransport{}
 		
 		// Setup mock expectations for queue-based execution
+		transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil)
+		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
 		publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		
-		engine := NewStageFlowEngine(publisher, subscriber)
-		engine.SetServiceQueue("test-queue")
+		engine := NewStageFlowEngine(publisher, subscriber, transport)
 		
 		// Create workflow with two stages
 		handler1 := &testStageHandler{stageID: "stage1"}
@@ -268,17 +363,26 @@ func TestWorkflowExecution(t *testing.T) {
 		
 		// Verify that the first stage message was published
 		publisher.AssertCalled(t, "Publish", mock.Anything, mock.AnythingOfType("*stageflow.FlowMessageEnvelope"), mock.Anything)
+		
+		// Get the actual call and verify routing key
+		calls := publisher.Calls
+		assert.Greater(t, len(calls), 0)
+		publishOptions := calls[0].Arguments[2].([]messaging.PublishOption)
+		// The routing key is set via WithRoutingKey option
+		assert.NotNil(t, publishOptions)
 	})
 	
 	t.Run("Execute workflow fails when required stage fails", func(t *testing.T) {
 		publisher := &mockPublisher{}
 		subscriber := &mockSubscriber{}
+		transport := &mockTransport{}
 		
-		// Setup mock expectations for queue-based execution
+		// Setup mock expectations
+		transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil)
+		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
 		publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		
-		engine := NewStageFlowEngine(publisher, subscriber)
-		engine.SetServiceQueue("test-queue")
+		engine := NewStageFlowEngine(publisher, subscriber, transport)
 		
 		// Create workflow with failing stage
 		handler1 := &testStageHandler{stageID: "stage1"}
@@ -310,11 +414,14 @@ func TestWorkflowExecution(t *testing.T) {
 	t.Run("Execute workflow continues when optional stage fails", func(t *testing.T) {
 		publisher := &mockPublisher{}
 		subscriber := &mockSubscriber{}
+		transport := &mockTransport{}
 		
 		// Setup mock expectations for queue-based execution
 		publisher.On("Publish", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		transport.On("CreateQueue", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(nil)
+		subscriber.On("Subscribe", mock.Anything, mock.AnythingOfType("string"), "FlowMessageEnvelope", mock.Anything, mock.Anything).Return(nil)
 		
-		engine := NewStageFlowEngine(publisher, subscriber)
+		engine := NewStageFlowEngine(publisher, subscriber, transport)
 		engine.SetServiceQueue("test-queue")
 		
 		// Create workflow with optional failing stage

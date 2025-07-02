@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"sync"
 	"time"
@@ -46,7 +47,7 @@ type SyncAsyncBridge struct {
 	cleanupTicker   *time.Ticker
 	done            chan struct{}
 	defaultTimeout  time.Duration
-	logger          interface{} // Accept logger but don't use it
+	logger          *slog.Logger
 }
 
 // BridgeOption configures the sync-async bridge
@@ -60,7 +61,7 @@ type BridgeConfig struct {
 	RetryPolicy        reliability.RetryPolicy
 	MaxPendingRequests int
 	DefaultTimeout     time.Duration
-	Logger             interface{}
+	Logger             *slog.Logger
 }
 
 // WithReplyQueue sets a custom reply queue name
@@ -112,6 +113,13 @@ func WithRetryPolicy(policy reliability.RetryPolicy) BridgeOption {
 	}
 }
 
+// WithBridgeLogger sets a custom logger for the bridge
+func WithBridgeLogger(logger *slog.Logger) BridgeOption {
+	return func(c *BridgeConfig) {
+		c.Logger = logger
+	}
+}
+
 // NewSyncAsyncBridge creates a new sync-async bridge
 func NewSyncAsyncBridge(publisher Publisher, subscriber Subscriber, logger interface{}, opts ...BridgeOption) (*SyncAsyncBridge, error) {
 	if publisher == nil {
@@ -121,12 +129,20 @@ func NewSyncAsyncBridge(publisher Publisher, subscriber Subscriber, logger inter
 		return nil, fmt.Errorf("subscriber cannot be nil")
 	}
 
+	// Convert logger to *slog.Logger if possible
+	var slogger *slog.Logger
+	if l, ok := logger.(*slog.Logger); ok {
+		slogger = l
+	} else {
+		slogger = slog.Default()
+	}
+
 	config := &BridgeConfig{
 		ReplyQueue:         fmt.Sprintf("bridge.reply.%s", uuid.New().String()[:8]),
 		CleanupInterval:    30 * time.Second,
 		MaxPendingRequests: 1000,
 		DefaultTimeout:     30 * time.Second,
-		Logger:             logger,
+		Logger:             slogger,
 	}
 
 	for _, opt := range opts {
@@ -212,7 +228,12 @@ func (b *SyncAsyncBridge) RequestCommand(ctx context.Context, cmd contracts.Comm
 	}
 
 	// Log correlation ID for debugging
-	fmt.Printf("[Bridge] Sending command with correlationID: %s, replyQueue: %s\n", correlationID, b.replyQueue)
+	if b.logger != nil {
+		b.logger.Debug("sending command",
+			"correlationID", correlationID,
+			"replyQueue", b.replyQueue,
+			"commandType", reflect.TypeOf(cmd).String())
+	}
 
 	return b.sendRequest(ctx, func(ctx context.Context) error {
 		return b.publisher.PublishCommand(ctx, cmd)
@@ -240,6 +261,14 @@ func (b *SyncAsyncBridge) RequestQuery(ctx context.Context, query contracts.Quer
 	correlationID := uuid.New().String()
 	if msg, ok := query.(contracts.Message); ok {
 		msg.SetCorrelationID(correlationID)
+	}
+
+	// Log correlation ID for debugging
+	if b.logger != nil {
+		b.logger.Debug("sending query",
+			"correlationID", correlationID,
+			"replyQueue", b.replyQueue,
+			"queryType", reflect.TypeOf(query).String())
 	}
 
 	return b.sendRequest(ctx, func(ctx context.Context) error {
@@ -317,11 +346,19 @@ func (b *SyncAsyncBridge) executeWithRetry(ctx context.Context, publishFunc func
 
 // handleReply processes incoming reply messages
 func (b *SyncAsyncBridge) handleReply(ctx context.Context, msg contracts.Message) error {
-	fmt.Printf("[Bridge] handleReply called with message type: %T\n", msg)
+	if b.logger != nil {
+		b.logger.Debug("handleReply called",
+			"messageType", reflect.TypeOf(msg).String(),
+			"messageID", msg.GetID())
+	}
 	
 	reply, ok := msg.(contracts.Reply)
 	if !ok {
-		fmt.Printf("[Bridge] ERROR: received non-reply message: %T\n", msg)
+		if b.logger != nil {
+			b.logger.Error("received non-reply message",
+				slog.String("messageType", reflect.TypeOf(msg).String()),
+				slog.String("messageID", msg.GetID()))
+		}
 		return fmt.Errorf("received non-reply message: %T", msg)
 	}
 
@@ -331,7 +368,11 @@ func (b *SyncAsyncBridge) handleReply(ctx context.Context, msg contracts.Message
 	}
 
 	// Log correlation ID for debugging
-	fmt.Printf("[Bridge] Received reply with correlationID: %s\n", correlationID)
+	if b.logger != nil {
+		b.logger.Debug("received reply",
+			"correlationID", correlationID,
+			"isSuccess", reply.IsSuccess())
+	}
 
 	b.mu.RLock()
 	pending, exists := b.pendingRequests[correlationID]
@@ -339,14 +380,21 @@ func (b *SyncAsyncBridge) handleReply(ctx context.Context, msg contracts.Message
 
 	if !exists {
 		// Request may have timed out or been cleaned up
-		fmt.Printf("[Bridge] No pending request found for correlationID: %s\n", correlationID)
+		if b.logger != nil {
+			b.logger.Debug("no pending request found",
+				"correlationID", correlationID,
+				"reason", "request may have timed out or been cleaned up")
+		}
 		return nil
 	}
 
 	// Send reply to waiting goroutine
 	select {
 	case pending.ResponseCh <- reply:
-		fmt.Printf("[Bridge] Successfully delivered reply for correlationID: %s\n", correlationID)
+		if b.logger != nil {
+			b.logger.Debug("successfully delivered reply",
+				"correlationID", correlationID)
+		}
 		return nil
 	case <-pending.Context.Done():
 		return nil // Request was cancelled
@@ -389,6 +437,12 @@ func (b *SyncAsyncBridge) cleanupExpiredRequests() {
 			}
 		}
 		b.mu.Unlock()
+		
+		if b.logger != nil {
+			b.logger.Debug("cleaned up expired requests",
+				"count", len(expiredIDs),
+				"remainingRequests", b.GetPendingRequestCount())
+		}
 	}
 }
 

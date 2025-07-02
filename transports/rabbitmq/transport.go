@@ -393,9 +393,9 @@ func (s *subscriberAdapter) Subscribe(ctx context.Context, queue string, handler
 				}
 				// Wrap delivery and call handler
 				delivery := &deliveryAdapter{delivery: d}
-				if err := handler(delivery); err != nil {
-					fmt.Printf("[Transport] Handler error for queue %s: %v\n", queue, err)
-				}
+				// Handler errors are handled at a higher level (in MessageSubscriber)
+				// The transport handler always returns nil
+				_ = handler(delivery)
 			}
 		}
 	}()

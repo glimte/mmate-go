@@ -447,8 +447,17 @@ func (p *Pipeline) Use(interceptor Interceptor) *Pipeline {
 	return p
 }
 
+// UseConditional adds an interceptor with a condition
+func (p *Pipeline) UseConditional(condition MessageFilter, interceptor Interceptor) *Pipeline {
+	p.interceptors = append(p.interceptors, NewConditionalInterceptor(condition, interceptor))
+	return p
+}
+
 // Execute executes the pipeline with the given handler as the final step
 func (p *Pipeline) Execute(ctx context.Context, msg contracts.Message, finalHandler MessageHandler) error {
+	// Ensure interceptor context exists
+	ctx, _ = EnsureInterceptorContext(ctx)
+	
 	if len(p.interceptors) == 0 {
 		return finalHandler.Handle(ctx, msg)
 	}
@@ -540,9 +549,45 @@ func (b *DefaultInterceptorChainBuilder) WithCircuitBreaker(circuitBreaker Circu
 	return b
 }
 
+// WithFiltering adds filtering interceptor
+func (b *DefaultInterceptorChainBuilder) WithFiltering(filter MessageFilter, skipBehavior SkipBehavior) *DefaultInterceptorChainBuilder {
+	b.chain.Add(NewFilteringInterceptor(filter, skipBehavior))
+	return b
+}
+
+// WithContextEnrichment adds context enrichment interceptor
+func (b *DefaultInterceptorChainBuilder) WithContextEnrichment(enricher ContextEnricher) *DefaultInterceptorChainBuilder {
+	b.chain.Add(NewContextEnrichmentInterceptor(enricher))
+	return b
+}
+
+// WithShortCircuit adds short-circuit interceptor
+func (b *DefaultInterceptorChainBuilder) WithShortCircuit(evaluator ShortCircuitEvaluator) *DefaultInterceptorChainBuilder {
+	b.chain.Add(NewShortCircuitInterceptor(evaluator))
+	return b
+}
+
+// WithCaching adds caching interceptor
+func (b *DefaultInterceptorChainBuilder) WithCaching(cache MessageCache) *DefaultInterceptorChainBuilder {
+	b.chain.Add(NewCachingInterceptor(cache))
+	return b
+}
+
+// WithDuplicateDetection adds duplicate detection interceptor
+func (b *DefaultInterceptorChainBuilder) WithDuplicateDetection(detector DuplicateDetector) *DefaultInterceptorChainBuilder {
+	b.chain.Add(NewDuplicateDetectionInterceptor(detector))
+	return b
+}
+
 // WithCustom adds a custom interceptor
 func (b *DefaultInterceptorChainBuilder) WithCustom(interceptor Interceptor) *DefaultInterceptorChainBuilder {
 	b.chain.Add(interceptor)
+	return b
+}
+
+// WithConditional adds a conditional interceptor
+func (b *DefaultInterceptorChainBuilder) WithConditional(condition MessageFilter, interceptor Interceptor) *DefaultInterceptorChainBuilder {
+	b.chain.Add(NewConditionalInterceptor(condition, interceptor))
 	return b
 }
 

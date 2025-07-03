@@ -33,7 +33,7 @@ func createTestEngineForPipeline() *StageFlowEngine {
 }
 
 // Helper function to simulate synchronous queue-based execution for testing
-func executeWorkflowSynchronously(t *testing.T, workflow *Workflow, initialData map[string]interface{}) (*WorkflowState, error) {
+func executeWorkflowSynchronously(_ *testing.T, workflow *Workflow, initialData map[string]interface{}) (*WorkflowState, error) {
 	publisher := &mockQueuePublisher{}
 	subscriber := &mockQueueSubscriber{}
 	transport := &mockTransport{}
@@ -71,10 +71,8 @@ func executeWorkflowSynchronously(t *testing.T, workflow *Workflow, initialData 
 	}
 	
 	// Copy initial data
-	if initialData != nil {
-		for k, v := range initialData {
-			finalState.GlobalData[k] = v
-		}
+	for k, v := range initialData {
+		finalState.GlobalData[k] = v
 	}
 	
 	// Process all messages and track stage results

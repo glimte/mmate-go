@@ -157,7 +157,7 @@ func NewWorkflowFailedEvent(workflow *Workflow, state *WorkflowState, stageErr e
 		Error:            stageErr.Error(),
 		StartTime:        state.StartTime,
 		FailureTime:      time.Now(),
-		Duration:         time.Now().Sub(state.StartTime),
+		Duration:         time.Since(state.StartTime),
 		CompletedStages:  len(state.StageResults),
 		TotalStages:      len(workflow.Stages),
 		StageResults:     state.StageResults,

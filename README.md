@@ -248,7 +248,7 @@ Teams using Mmate-Go ship messaging features 10x faster with built-in reliabilit
 ## 🛣️ **Messaging Framework Roadmap**
 
 ### ✅ **Current (v1.0)**
-- RabbitMQ message broker transport integration
+- RabbitMQ and amazonMQ message broker transport integration
 - Enterprise message queue reliability features
 - Message workflow orchestration  
 - Service-scoped message monitoring

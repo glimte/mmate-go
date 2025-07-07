@@ -27,6 +27,7 @@ import (
 	"github.com/glimte/mmate-go/internal/rabbitmq"
 	"github.com/glimte/mmate-go/interceptors"
 	"github.com/glimte/mmate-go/internal/reliability"
+	"github.com/glimte/mmate-go/internal/journal"
 	"github.com/glimte/mmate-go/monitor"
 	"github.com/glimte/mmate-go/schema"
 	"github.com/glimte/mmate-go/stageflow"
@@ -34,16 +35,21 @@ import (
 
 // Client provides the main entry point for mmate-go
 type Client struct {
-	transport         messaging.Transport
-	publisher         *messaging.MessagePublisher
-	subscriber        *messaging.MessageSubscriber
-	dispatcher        *messaging.MessageDispatcher
-	bridge            *bridge.SyncAsyncBridge
-	contractDiscovery *messaging.ContractDiscovery
-	serviceName       string
-	receiveQueue      string
-	metricsCollector  interceptors.MetricsCollector
-	connectionString  string // Store for monitoring access
+	transport          messaging.Transport
+	publisher          *messaging.MessagePublisher
+	subscriber         *messaging.MessageSubscriber
+	dispatcher         *messaging.MessageDispatcher
+	bridge             *bridge.SyncAsyncBridge
+	contractDiscovery  *messaging.ContractDiscovery
+	serviceName        string
+	receiveQueue       string
+	metricsCollector   interceptors.MetricsCollector
+	connectionString   string // Store for monitoring access
+	
+	// Enterprise features
+	ttlRetryScheduler  *reliability.TTLRetryScheduler
+	ackTracker         *messaging.AcknowledgmentTracker
+	syncJournal        journal.SyncMutationJournal
 }
 
 // NewClient creates a new mmate client with default RabbitMQ transport
@@ -77,6 +83,48 @@ func NewClientWithOptions(connectionString string, options ...ClientOption) (*Cl
 	transport, err := rabbitmqTransport.NewTransport(connectionString, transportOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create transport: %w", err)
+	}
+
+	// Initialize enterprise features
+	var ttlRetryScheduler *reliability.TTLRetryScheduler
+	var ackTracker *messaging.AcknowledgmentTracker
+	var syncJournal journal.SyncMutationJournal
+	
+	// Get channel pool for enterprise features
+	var channelPool *rabbitmq.ChannelPool
+	if cfg.enableTTLRetry || cfg.enableAckTracking {
+		// Create a separate connection manager for enterprise features
+		connManager := rabbitmq.NewConnectionManager(connectionString)
+		if err := connManager.Connect(context.Background()); err != nil {
+			return nil, fmt.Errorf("failed to connect for enterprise features: %w", err)
+		}
+		
+		channelPool, err = rabbitmq.NewChannelPool(connManager)
+		if err != nil {
+			connManager.Close()
+			return nil, fmt.Errorf("failed to create channel pool for enterprise features: %w", err)
+		}
+	}
+	
+	// Create TTL retry scheduler if enabled
+	if cfg.enableTTLRetry && channelPool != nil {
+		ttlRetryScheduler = reliability.NewTTLRetryScheduler(channelPool, &reliability.TTLRetrySchedulerOptions{
+			Logger: cfg.logger,
+		})
+		if err := ttlRetryScheduler.Initialize(context.Background()); err != nil {
+			return nil, fmt.Errorf("failed to initialize TTL retry scheduler: %w", err)
+		}
+		cfg.logger.Info("TTL retry scheduler enabled")
+	}
+	
+	// Create sync mutation journal if enabled
+	if cfg.enableSyncJournal {
+		baseOpts := []journal.InMemoryJournalOption{
+			journal.WithMaxEntries(10000),
+		}
+		syncOpts := append(cfg.syncJournalOptions, journal.WithServiceID(cfg.serviceName))
+		syncJournal = journal.NewInMemorySyncMutationJournal(baseOpts, syncOpts...)
+		cfg.logger.Info("Sync mutation journal enabled")
 	}
 
 	// Create dispatcher (will configure contract extractor later if enabled)
@@ -115,6 +163,15 @@ func NewClientWithOptions(connectionString string, options ...ClientOption) (*Cl
 		transport.Publisher(),
 		publisherOpts...,
 	)
+	
+	// Create acknowledgment tracker if enabled (after publisher is created)
+	if cfg.enableAckTracking && publisher != nil {
+		ackTracker = messaging.NewAcknowledgmentTracker(publisher, &messaging.AcknowledgmentTrackerOptions{
+			DefaultTimeout: cfg.ackTimeout,
+			Logger:         cfg.logger,
+		})
+		cfg.logger.Info("Acknowledgment tracking enabled", "timeout", cfg.ackTimeout)
+	}
 
 	// Create subscriber with interceptors and DLQ handler if configured
 	subscriberOpts := []messaging.SubscriberOption{
@@ -129,7 +186,7 @@ func NewClientWithOptions(connectionString string, options ...ClientOption) (*Cl
 	// Create default pipeline with interceptors if enabled
 	if cfg.subscribePipeline != nil {
 		subscriberOpts = append(subscriberOpts, messaging.WithSubscriberInterceptors(cfg.subscribePipeline))
-	} else if cfg.enableDefaultRetry || cfg.retryPolicy != nil || sharedMetricsCollector != nil {
+	} else if cfg.enableTTLRetry || cfg.enableDefaultRetry || cfg.retryPolicy != nil || sharedMetricsCollector != nil {
 		// Create default pipeline with interceptors
 		pipeline := interceptors.NewPipeline()
 		
@@ -139,15 +196,29 @@ func NewClientWithOptions(connectionString string, options ...ClientOption) (*Cl
 			pipeline.Use(metricsInterceptor)
 		}
 		
-		// Add retry interceptor if configured
-		if cfg.retryPolicy != nil {
+		// Add retry interceptor based on configuration
+		if cfg.enableTTLRetry && ttlRetryScheduler != nil {
+			// Use TTL-based retry interceptor
+			ttlRetryInterceptor := interceptors.NewTTLRetryInterceptor(ttlRetryScheduler, &interceptors.TTLRetryInterceptorOptions{
+				RetryPolicy: cfg.ttlRetryPolicy,
+				Logger:      cfg.logger,
+			})
+			pipeline.Use(ttlRetryInterceptor)
+		} else if cfg.retryPolicy != nil {
+			// Use basic retry interceptor with custom policy
 			retryInterceptor := interceptors.NewRetryInterceptor(cfg.retryPolicy).WithLogger(cfg.logger)
 			pipeline.Use(retryInterceptor)
 		} else if cfg.enableDefaultRetry {
-			// Use default retry policy
+			// Use default basic retry policy
 			defaultPolicy := reliability.NewExponentialBackoff(100*time.Millisecond, 30*time.Second, 2.0, 3)
 			retryInterceptor := interceptors.NewRetryInterceptor(defaultPolicy).WithLogger(cfg.logger)
 			pipeline.Use(retryInterceptor)
+		}
+		
+		// Add processing acknowledgment interceptor if enabled
+		if cfg.enableAckTracking && publisher != nil {
+			processingAckInterceptor := messaging.NewProcessingAckInterceptor(publisher).WithLogger(cfg.logger)
+			pipeline.Use(processingAckInterceptor)
 		}
 		
 		subscriberOpts = append(subscriberOpts, messaging.WithSubscriberInterceptors(pipeline))
@@ -216,11 +287,17 @@ func NewClientWithOptions(connectionString string, options ...ClientOption) (*Cl
 		publisher:         publisher,
 		subscriber:        subscriber,
 		dispatcher:        dispatcher,
+		bridge:            nil, // Created lazily
 		contractDiscovery: contractDiscovery,
 		serviceName:       cfg.serviceName,
 		receiveQueue:      queueName,
 		metricsCollector:  sharedMetricsCollector,
 		connectionString:  connectionString,
+		
+		// Enterprise features
+		ttlRetryScheduler: ttlRetryScheduler,
+		ackTracker:        ackTracker,
+		syncJournal:       syncJournal,
 	}, nil
 }
 
@@ -371,6 +448,23 @@ func (c *Client) ContractDiscovery() *messaging.ContractDiscovery {
 	return c.contractDiscovery
 }
 
+// Enterprise features accessors
+
+// TTLRetryScheduler returns the TTL retry scheduler if enabled
+func (c *Client) TTLRetryScheduler() *reliability.TTLRetryScheduler {
+	return c.ttlRetryScheduler
+}
+
+// AcknowledgmentTracker returns the acknowledgment tracker if enabled
+func (c *Client) AcknowledgmentTracker() *messaging.AcknowledgmentTracker {
+	return c.ackTracker
+}
+
+// SyncMutationJournal returns the sync mutation journal if enabled
+func (c *Client) SyncMutationJournal() journal.SyncMutationJournal {
+	return c.syncJournal
+}
+
 // RegisterEndpoint registers a service endpoint for discovery
 func (c *Client) RegisterEndpoint(ctx context.Context, contract *contracts.EndpointContract) error {
 	if c.contractDiscovery == nil {
@@ -477,6 +571,57 @@ func (c *Client) BeginTx() (*messaging.Transaction, error) {
 	return c.publisher.BeginTx()
 }
 
+// Enterprise features convenience methods
+
+// SendWithAck sends a message and waits for processing acknowledgment
+// Returns the acknowledgment response or an error if acknowledgment tracking is not enabled
+func (c *Client) SendWithAck(ctx context.Context, msg contracts.Message, options ...messaging.PublishOption) (*messaging.AckResponse, error) {
+	if c.ackTracker == nil {
+		return nil, fmt.Errorf("acknowledgment tracking not enabled")
+	}
+	return c.ackTracker.SendWithAck(ctx, msg, options...)
+}
+
+// PublishEventWithAck publishes an event and waits for processing acknowledgment
+func (c *Client) PublishEventWithAck(ctx context.Context, evt contracts.Event, options ...messaging.PublishOption) (*messaging.AckResponse, error) {
+	if c.ackTracker == nil {
+		return nil, fmt.Errorf("acknowledgment tracking not enabled")
+	}
+	return c.ackTracker.SendWithAck(ctx, evt, options...)
+}
+
+// PublishCommandWithAck publishes a command and waits for processing acknowledgment
+func (c *Client) PublishCommandWithAck(ctx context.Context, cmd contracts.Command, options ...messaging.PublishOption) (*messaging.AckResponse, error) {
+	if c.ackTracker == nil {
+		return nil, fmt.Errorf("acknowledgment tracking not enabled")
+	}
+	return c.ackTracker.SendWithAck(ctx, cmd, options...)
+}
+
+// RecordEntityMutation records an entity-level mutation for synchronization
+func (c *Client) RecordEntityMutation(ctx context.Context, record *journal.EntityMutationRecord) error {
+	if c.syncJournal == nil {
+		return fmt.Errorf("sync mutation journal not enabled")
+	}
+	return c.syncJournal.RecordEntityMutation(ctx, record)
+}
+
+// GetEntityMutations retrieves mutations for a specific entity
+func (c *Client) GetEntityMutations(ctx context.Context, entityType, entityID string) ([]*journal.EntityMutationRecord, error) {
+	if c.syncJournal == nil {
+		return nil, fmt.Errorf("sync mutation journal not enabled")
+	}
+	return c.syncJournal.GetEntityMutations(ctx, entityType, entityID)
+}
+
+// GetUnsyncedMutations retrieves mutations that haven't been synced
+func (c *Client) GetUnsyncedMutations(ctx context.Context, limit int) ([]*journal.EntityMutationRecord, error) {
+	if c.syncJournal == nil {
+		return nil, fmt.Errorf("sync mutation journal not enabled")
+	}
+	return c.syncJournal.GetUnsyncedMutations(ctx, limit)
+}
+
 // NewStageFlowEngine creates a new StageFlow engine with contract extraction if enabled
 func (c *Client) NewStageFlowEngine(opts ...stageflow.EngineOption) *stageflow.StageFlowEngine {
 	engine := stageflow.NewStageFlowEngine(c.publisher, c.subscriber, c.transport, opts...)
@@ -495,6 +640,21 @@ func (c *Client) NewStageFlowEngine(opts ...stageflow.EngineOption) *stageflow.S
 
 // Close closes all resources
 func (c *Client) Close() error {
+	// Close enterprise features first
+	if c.ackTracker != nil {
+		if err := c.ackTracker.Close(); err != nil {
+			// Log error if possible, but don't fail close operation
+			slog.Error("Failed to close acknowledgment tracker", "error", err)
+		}
+	}
+	if c.ttlRetryScheduler != nil {
+		if err := c.ttlRetryScheduler.Close(); err != nil {
+			// Log error if possible, but don't fail close operation
+			slog.Error("Failed to close TTL retry scheduler", "error", err)
+		}
+	}
+	
+	// Close other components
 	if c.contractDiscovery != nil {
 		c.contractDiscovery.Stop()
 	}
@@ -528,6 +688,14 @@ type clientConfig struct {
 	enableDefaultMetrics    bool
 	circuitBreaker          *reliability.CircuitBreaker
 	enableContractPublishing bool
+	
+	// Enterprise features configuration
+	enableTTLRetry          bool
+	ttlRetryPolicy          reliability.RetryPolicy
+	enableAckTracking       bool
+	ackTimeout              time.Duration
+	enableSyncJournal       bool
+	syncJournalOptions      []journal.SyncJournalOption
 }
 
 // ClientOption configures the client
@@ -636,5 +804,45 @@ func WithCircuitBreaker(cb *reliability.CircuitBreaker) ClientOption {
 func WithContractPublishing() ClientOption {
 	return func(cfg *clientConfig) {
 		cfg.enableContractPublishing = true
+	}
+}
+
+// Enterprise features configuration options
+
+// WithTTLRetry enables TTL-based retry scheduling using RabbitMQ DLX
+func WithTTLRetry(policy ...reliability.RetryPolicy) ClientOption {
+	return func(cfg *clientConfig) {
+		cfg.enableTTLRetry = true
+		if len(policy) > 0 {
+			cfg.ttlRetryPolicy = policy[0]
+		} else {
+			// Default TTL retry policy
+			cfg.ttlRetryPolicy = reliability.NewExponentialBackoff(
+				100*time.Millisecond,
+				30*time.Second,
+				2.0,
+				5,
+			)
+		}
+	}
+}
+
+// WithAcknowledgmentTracking enables application-level acknowledgment tracking
+func WithAcknowledgmentTracking(timeout ...time.Duration) ClientOption {
+	return func(cfg *clientConfig) {
+		cfg.enableAckTracking = true
+		if len(timeout) > 0 {
+			cfg.ackTimeout = timeout[0]
+		} else {
+			cfg.ackTimeout = 30 * time.Second
+		}
+	}
+}
+
+// WithSyncMutationJournal enables enhanced mutation journal with sync capabilities
+func WithSyncMutationJournal(options ...journal.SyncJournalOption) ClientOption {
+	return func(cfg *clientConfig) {
+		cfg.enableSyncJournal = true
+		cfg.syncJournalOptions = options
 	}
 }

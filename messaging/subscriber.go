@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -416,38 +418,53 @@ func (s *MessageSubscriber) extractMessage(envelope *contracts.Envelope) (contra
 		return &msg, nil
 	}
 	
-	// Create a complete message structure following wire format
-	messageData := make(map[string]interface{})
-	
-	// Set base message fields from envelope
-	messageData["id"] = envelope.ID
-	messageData["type"] = envelope.Type
-	messageData["timestamp"] = envelope.Timestamp
-	if envelope.CorrelationID != "" {
-		messageData["correlationId"] = envelope.CorrelationID
-	}
-	
-	// Merge payload fields
+	// First, unmarshal the payload directly into the typed instance
+	// This preserves embedded struct relationships and handles JSON properly
 	if envelope.Payload != nil {
-		var payloadMap map[string]interface{}
-		if err := json.Unmarshal(envelope.Payload, &payloadMap); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal payload: %w", err)
-		}
-		
-		// Merge payload fields into message data
-		for k, v := range payloadMap {
-			messageData[k] = v
+		if err := json.Unmarshal(envelope.Payload, instance); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal payload into %s: %w", envelope.Type, err)
 		}
 	}
 	
-	// Serialize complete message data and unmarshal into typed instance
-	completeMessageData, err := json.Marshal(messageData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal complete message data: %w", err)
+	// Then set the envelope fields directly on the instance using reflection
+	// This ensures BaseMessage fields from envelope override payload values
+	instanceValue := reflect.ValueOf(instance)
+	if instanceValue.Kind() == reflect.Ptr {
+		instanceValue = instanceValue.Elem()
 	}
 	
-	if err := json.Unmarshal(completeMessageData, instance); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal complete message into %s: %w", envelope.Type, err)
+	// Set ID field
+	if idField := findFieldByJSONTag(instanceValue, "id"); idField.IsValid() && idField.CanSet() {
+		if idField.Kind() == reflect.String {
+			idField.SetString(envelope.ID)
+		}
+	}
+	
+	// Set Type field  
+	if typeField := findFieldByJSONTag(instanceValue, "type"); typeField.IsValid() && typeField.CanSet() {
+		if typeField.Kind() == reflect.String {
+			typeField.SetString(envelope.Type)
+		}
+	}
+	
+	// Set Timestamp field
+	if timestampField := findFieldByJSONTag(instanceValue, "timestamp"); timestampField.IsValid() && timestampField.CanSet() {
+		if timestampField.Type() == reflect.TypeOf(time.Time{}) {
+			if envelope.Timestamp != "" {
+				if timestamp, err := time.Parse(time.RFC3339, envelope.Timestamp); err == nil {
+					timestampField.Set(reflect.ValueOf(timestamp))
+				}
+			}
+		}
+	}
+	
+	// Set CorrelationID field
+	if envelope.CorrelationID != "" {
+		if corrField := findFieldByJSONTag(instanceValue, "correlationId"); corrField.IsValid() && corrField.CanSet() {
+			if corrField.Kind() == reflect.String {
+				corrField.SetString(envelope.CorrelationID)
+			}
+		}
 	}
 	
 	// Ensure it's a message
@@ -457,6 +474,37 @@ func (s *MessageSubscriber) extractMessage(envelope *contracts.Envelope) (contra
 	}
 	
 	return msg, nil
+}
+
+// findFieldByJSONTag searches for a field with the given JSON tag, including in embedded structs
+func findFieldByJSONTag(structValue reflect.Value, jsonTag string) reflect.Value {
+	structType := structValue.Type()
+	
+	// Search direct fields first
+	for i := 0; i < structValue.NumField(); i++ {
+		field := structType.Field(i)
+		fieldValue := structValue.Field(i)
+		
+		// Check if this field has the JSON tag we're looking for
+		tag := field.Tag.Get("json")
+		if tag != "" {
+			// Parse the tag (format: "name,omitempty" or just "name")
+			tagName := strings.Split(tag, ",")[0]
+			if tagName == jsonTag {
+				return fieldValue
+			}
+		}
+		
+		// If this is an embedded struct, search recursively
+		if field.Anonymous && fieldValue.Kind() == reflect.Struct {
+			if foundField := findFieldByJSONTag(fieldValue, jsonTag); foundField.IsValid() {
+				return foundField
+			}
+		}
+	}
+	
+	// Not found
+	return reflect.Value{}
 }
 
 // createDeliveryHandler creates a delivery handler for the transport
